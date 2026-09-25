@@ -12,6 +12,14 @@ def get_db() -> sqlite3.Connection:
     return conn
 
 
+def add_points(conn: sqlite3.Connection, user_id: int, delta: int, reason: str) -> int:
+    """增加/扣减积分并写入积分流水，返回用户新积分。"""
+    conn.execute("UPDATE users SET points = points + ? WHERE id = ?", (delta, user_id))
+    conn.execute("INSERT INTO point_logs (user_id, delta, reason) VALUES (?, ?, ?)", (user_id, delta, reason))
+    new_points = conn.execute("SELECT points FROM users WHERE id = ?", (user_id,)).fetchone()[0]
+    return new_points
+
+
 def init_db() -> None:
     """自动建表并注入种子数据。"""
     conn = get_db()

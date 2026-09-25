@@ -4,6 +4,34 @@ from typing import Optional
 from pydantic import BaseModel, Field
 
 
+class PointLogOut(BaseModel):
+    id: int
+    user_id: int
+    delta: int
+    reason: str
+    created_at: str
+
+
+class ProductOut(BaseModel):
+    id: int
+    name: str
+    description: str
+    cost_points: int
+    stock: int
+    emoji: str
+
+
+class RedeemRequest(BaseModel):
+    user_id: int
+    product_id: int
+
+
+class RedeemOut(BaseModel):
+    ok: bool
+    message: str
+    remaining_points: int
+
+
 class Health(BaseModel):
     status: str
     app: str

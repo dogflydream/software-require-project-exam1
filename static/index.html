@@ -93,8 +93,67 @@
       </div>
     </section>
 
+    <!-- ===== 商城 ===== -->
+    <section v-show="activeTab === 'mall'">
+      <div class="flex flex-wrap items-center gap-3 mb-5">
+        <h2 class="text-xl font-bold text-gray-800">碳积分商城</h2>
+        <p class="text-sm text-gray-400">用循环闲置赚来的碳积分兑换绿色好礼</p>
+        <span class="ml-auto px-3 py-1.5 rounded-full bg-amber-100 text-amber-700 text-sm font-semibold">我的碳积分：{{ me ? me.points : 0 }}</span>
+      </div>
+      <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+        <div v-for="p in products" :key="p.id" class="bg-white rounded-2xl border border-emerald-100 shadow-sm hover:shadow-lg transition p-5 flex flex-col">
+          <div class="flex items-start justify-between">
+            <span class="text-4xl">{{ p.emoji }}</span>
+            <span class="px-2 py-0.5 rounded-full text-xs bg-emerald-50 text-emerald-700 border border-emerald-100">库存 {{ p.stock }}</span>
+          </div>
+          <h3 class="mt-3 font-semibold text-gray-800">{{ p.name }}</h3>
+          <p class="text-sm text-gray-500 flex-1 mt-1">{{ p.description }}</p>
+          <div class="mt-4 flex items-center justify-between">
+            <span class="text-amber-600 font-bold">{{ p.cost_points }} 碳积分</span>
+            <button @click="redeem(p)" :disabled="!me || p.stock <= 0 || (me && me.points < p.cost_points)"
+              class="px-4 py-1.5 rounded-full text-sm font-semibold transition disabled:opacity-40 disabled:cursor-not-allowed"
+              :class="me && me.points >= p.cost_points && p.stock > 0 ? 'bg-amber-500 hover:bg-amber-600 text-white' : 'bg-gray-100 text-gray-400'">
+              {{ p.stock <= 0 ? '已兑完' : '兑换' }}
+            </button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===== 个人中心 ===== -->
+    <section v-show="activeTab === 'profile'">
+      <div v-if="me" class="grid grid-cols-1 lg:grid-cols-3 gap-4">
+        <div class="bg-white rounded-2xl border border-emerald-100 shadow-sm p-6">
+          <div class="text-5xl mb-3">🌱</div>
+          <h3 class="text-lg font-bold text-gray-800">{{ me.name }}</h3>
+          <p class="text-sm text-gray-400">{{ me.college }} · 学号 {{ me.student_no }}</p>
+          <p class="mt-1 text-xs text-gray-400">{{ me.role === 'admin' ? '平台管理员' : '在校学生' }}</p>
+          <div class="mt-4 p-4 rounded-xl bg-gradient-to-br from-emerald-500 to-emerald-600 text-white">
+            <p class="text-xs opacity-80">我的碳积分</p>
+            <p class="text-3xl font-bold mt-1">{{ me.points }}</p>
+          </div>
+        </div>
+        <div class="lg:col-span-2 bg-white rounded-2xl border border-emerald-100 shadow-sm p-6">
+          <h3 class="font-bold text-gray-800 mb-3">📋 碳积分流水</h3>
+          <div v-if="pointLogs.length === 0" class="text-sm text-gray-400 py-8 text-center">暂无积分记录，去发布一件闲置吧～</div>
+          <ul v-else class="divide-y divide-gray-100">
+            <li v-for="log in pointLogs" :key="log.id" class="py-2.5 flex items-center justify-between">
+              <div>
+                <p class="text-sm text-gray-700">{{ log.reason }}</p>
+                <p class="text-[11px] text-gray-400">{{ log.created_at }}</p>
+              </div>
+              <span class="text-sm font-bold" :class="log.delta >= 0 ? 'text-emerald-600' : 'text-red-500'">
+                {{ log.delta >= 0 ? '+' : '' }}{{ log.delta }}
+              </span>
+            </li>
+          </ul>
+        </div>
+      </div>
+      <div v-else class="bg-white rounded-2xl border border-emerald-100 shadow-sm p-16 text-center text-gray-400">请先在右上角选择身份</div>
+    </section>
+
     <!-- ===== 占位 Tab ===== -->
-    <section v-for="t in tabs.filter(t => ['mall','rank','profile','admin'].includes(t.key))" :key="t.key" v-show="activeTab === t.key"
+    <section v-for="t in tabs.filter(t => ['rank','admin'].includes(t.key))" :key="t.key" v-show="activeTab === t.key"
       class="bg-white rounded-2xl border border-emerald-100 shadow-sm p-16 text-center">
       <div class="text-5xl mb-4">{{ t.icon }}</div>
       <h2 class="text-lg font-bold text-gray-700">{{ t.name }}</h2>
@@ -148,7 +207,7 @@
 </div>
 
 <script>
-const { createApp, ref, computed, onMounted } = Vue;
+const { createApp, ref, computed, onMounted, watch } = Vue;
 
 createApp({
   setup() {
@@ -167,6 +226,8 @@ createApp({
     const itemsLoading = ref(false);
     const filterCategory = ref('');
     const keyword = ref('');
+    const products = ref([]);
+    const pointLogs = ref([]);
     const showPublish = ref(false);
     const publishing = ref(false);
     const publishError = ref('');
@@ -203,6 +264,17 @@ createApp({
       }
     }
 
+    async function loadProducts() {
+      const res = await fetch('/api/products');
+      products.value = await res.json();
+    }
+
+    async function loadPointLogs() {
+      if (!currentUserId.value) return;
+      const res = await fetch('/api/point-logs?user_id=' + currentUserId.value);
+      pointLogs.value = await res.json();
+    }
+
     function openPublish() {
       if (!me.value) return showToast('请先选择身份', 'error');
       form.value = { title: '', category: '教材', description: '', price: 0 };
@@ -222,8 +294,10 @@ createApp({
         });
         if (!res.ok) { const e = await res.json(); publishError.value = e.detail || '发布失败'; return; }
         showPublish.value = false;
-        showToast('发布成功！你的闲置已上架市集 🌿');
+        showToast('发布成功！获得 10 碳积分 🌿');
         loadItems();
+        loadUsers();
+        loadPointLogs();
       } finally {
         publishing.value = false;
       }
@@ -233,15 +307,35 @@ createApp({
       showToast('预约功能将在增量 4（订单流转）中开放 🚧', 'error');
     }
 
+    async function redeem(p) {
+      if (!me.value) return showToast('请先选择身份', 'error');
+      const res = await fetch('/api/redeem', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ user_id: currentUserId.value, product_id: p.id }),
+      });
+      const data = await res.json();
+      if (!res.ok) return showToast(data.detail || '兑换失败', 'error');
+      showToast(data.message + ' ✅');
+      await loadUsers();
+      loadProducts();
+      loadPointLogs();
+    }
+
     onMounted(async () => {
       await loadUsers();
       loadItems();
+      loadProducts();
+      loadPointLogs();
     });
+
+    watch([currentUserId, activeTab], () => loadPointLogs());
 
     return {
       tabs, activeTab, users, currentUserId, me, items, itemsLoading,
       filterCategory, keyword, showPublish, publishing, publishError, form, toast,
-      emoji, loadItems, openPublish, submitPublish, reserveItem, showToast,
+      products, pointLogs,
+      emoji, loadItems, openPublish, submitPublish, reserveItem, showToast, redeem,
     };
   },
 }).mount('#app');

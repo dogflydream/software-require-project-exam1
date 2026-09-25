@@ -1,3 +1,28 @@
+-- 绿循校园 数据库结构（增量 2：碳积分流水与兑换礼品）
+CREATE TABLE IF NOT EXISTS point_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL REFERENCES users(id),
+    delta INTEGER NOT NULL,                        -- 正为获得，负为消耗
+    reason TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+);
+
+CREATE TABLE IF NOT EXISTS products (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    cost_points INTEGER NOT NULL,
+    stock INTEGER NOT NULL DEFAULT 0,
+    emoji TEXT NOT NULL DEFAULT '🎁'
+);
+
+-- 种子数据：积分商城礼品
+INSERT INTO products (name, description, cost_points, stock, emoji) SELECT '定制帆布袋', '环保帆布材质，绿循校园纪念款', 100, 20, '🛍️' WHERE NOT EXISTS (SELECT 1 FROM products WHERE name='定制帆布袋');
+INSERT INTO products (name, description, cost_points, stock, emoji) SELECT '食堂 5 元代金券', '全校食堂通用，当月有效', 60, 50, '🎫' WHERE NOT EXISTS (SELECT 1 FROM products WHERE name='食堂 5 元代金券');
+INSERT INTO products (name, description, cost_points, stock, emoji) SELECT '植物盲盒（多肉）', '随机品种，含花盆与营养土', 150, 15, '🪴' WHERE NOT EXISTS (SELECT 1 FROM products WHERE name='植物盲盒（多肉）');
+INSERT INTO products (name, description, cost_points, stock, emoji) SELECT '校园文创笔记本', '再生纸材质，碳足迹标识', 120, 30, '📒' WHERE NOT EXISTS (SELECT 1 FROM products WHERE name='校园文创笔记本');
+INSERT INTO products (name, description, cost_points, stock, emoji) SELECT '咖啡免费券', '校园咖啡店任意一杯', 200, 10, '☕' WHERE NOT EXISTS (SELECT 1 FROM products WHERE name='咖啡免费券');
+
 -- 绿循校园 数据库结构（增量 1：用户与物品）
 CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

@@ -7,11 +7,14 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 import database
-from models import Health, ItemCreate, ItemOut, UserOut
+from models import Health, ItemCreate, ItemOut, PointLogOut, ProductOut, RedeemOut, RedeemRequest, UserOut
 
-app = FastAPI(title="绿循校园", version="0.1.0")
+app = FastAPI(title="绿循校园", version="0.2.0")
 
 STATIC_DIR = Path(__file__).parent / "static"
+
+# 发布一件闲置奖励的碳积分
+REWARD_PUBLISH = 10
 
 
 def rows_to_dicts(rows) -> List[dict]:
@@ -73,6 +76,8 @@ def create_item(payload: ItemCreate) -> dict:
         "INSERT INTO items (owner_id, title, category, description, price) VALUES (?, ?, ?, ?, ?)",
         (payload.owner_id, payload.title, payload.category, payload.description, payload.price),
     )
+    # 发布闲置赠送碳积分并记录流水
+    database.add_points(conn, payload.owner_id, REWARD_PUBLISH, f"发布闲置《{payload.title}》获得碳积分")
     row = conn.execute(
         """
         SELECT i.*, u.name AS owner_name, u.college AS owner_college
@@ -83,6 +88,47 @@ def create_item(payload: ItemCreate) -> dict:
     conn.commit()
     conn.close()
     return dict(row)
+
+
+@app.get("/api/point-logs", response_model=List[PointLogOut])
+def list_point_logs(user_id: int) -> List[dict]:
+    """某用户的积分流水。"""
+    conn = database.get_db()
+    rows = conn.execute(
+        "SELECT * FROM point_logs WHERE user_id = ? ORDER BY id DESC LIMIT 50", (user_id,)
+    ).fetchall()
+    conn.close()
+    return rows_to_dicts(rows)
+
+
+@app.get("/api/products", response_model=List[ProductOut])
+def list_products() -> List[dict]:
+    conn = database.get_db()
+    rows = conn.execute("SELECT * FROM products ORDER BY cost_points").fetchall()
+    conn.close()
+    return rows_to_dicts(rows)
+
+
+@app.post("/api/redeem", response_model=RedeemOut)
+def redeem(payload: RedeemRequest) -> RedeemOut:
+    """积分商城礼品兑换。"""
+    conn = database.get_db()
+    user = conn.execute("SELECT * FROM users WHERE id = ?", (payload.user_id,)).fetchone()
+    product = conn.execute("SELECT * FROM products WHERE id = ?", (payload.product_id,)).fetchone()
+    if not user or not product:
+        conn.close()
+        raise HTTPException(status_code=404, detail="用户或礼品不存在")
+    if product["stock"] <= 0:
+        conn.close()
+        raise HTTPException(status_code=400, detail="礼品库存不足")
+    if user["points"] < product["cost_points"]:
+        conn.close()
+        raise HTTPException(status_code=400, detail=f"碳积分不足，还差 {product['cost_points'] - user['points']} 分")
+    remaining = database.add_points(conn, payload.user_id, -product["cost_points"], f"兑换礼品「{product['name']}」")
+    conn.execute("UPDATE products SET stock = stock - 1 WHERE id = ?", (payload.product_id,))
+    conn.commit()
+    conn.close()
+    return RedeemOut(ok=True, message=f"成功兑换「{product['name']}」，请到学生会办公室领取", remaining_points=remaining)
 
 
 @app.get("/")
