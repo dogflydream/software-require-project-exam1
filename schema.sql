@@ -63,3 +63,10 @@ INSERT INTO items (owner_id, title, category, description, price) SELECT 4, '小
 INSERT INTO items (owner_id, title, category, description, price) SELECT 4, '置物收纳架（三层）', '生活品', '毕业急出，宿舍楼下自提', 20.0 WHERE NOT EXISTS (SELECT 1 FROM items WHERE title='置物收纳架（三层）');
 INSERT INTO items (owner_id, title, category, description, price) SELECT 5, '英语四级词汇书 闪过', '教材', '背完了已过级，助力下一届', 8.0 WHERE NOT EXISTS (SELECT 1 FROM items WHERE title='英语四级词汇书 闪过');
 INSERT INTO items (owner_id, title, category, description, price) SELECT 5, '自行车（捷安特 ATX）', '生活品', '骑了一年，车况良好，附车锁', 260.0 WHERE NOT EXISTS (SELECT 1 FROM items WHERE title='自行车（捷安特 ATX）');
+
+-- 种子数据：已完成流转的历史物品（用于排行榜与统计演示）
+INSERT INTO items (owner_id, title, category, description, price, status, cycle_count, carbon_saved) SELECT 2, '《线性代数》第六版', '教材', '已完成3次流转的明星教材', 12.0, 'completed', 3, 7.5 WHERE NOT EXISTS (SELECT 1 FROM items WHERE title='《线性代数》第六版');
+INSERT INTO items (owner_id, title, category, description, price, status, cycle_count, carbon_saved) SELECT 3, '《考研数学复习全书》', '考研', '已完成2次流转', 20.0, 'completed', 2, 4.0 WHERE NOT EXISTS (SELECT 1 FROM items WHERE title='《考研数学复习全书》');
+INSERT INTO items (owner_id, title, category, description, price, status, cycle_count, carbon_saved) SELECT 4, '旧自行车（已循环）', '生活品', '已完成1次流转', 150.0, 'completed', 1, 3.5 WHERE NOT EXISTS (SELECT 1 FROM items WHERE title='旧自行车（已循环）');
+INSERT INTO items (owner_id, title, category, description, price, status, cycle_count, carbon_saved) SELECT 5, '《新概念英语》全套', '教材', '已完成2次流转', 30.0, 'completed', 2, 5.0 WHERE NOT EXISTS (SELECT 1 FROM items WHERE title='《新概念英语》全套');
+INSERT INTO items (owner_id, title, category, description, price, status, cycle_count, carbon_saved) SELECT 2, '宿舍小冰箱', '生活品', '已完成1次流转', 199.0, 'completed', 1, 3.5 WHERE NOT EXISTS (SELECT 1 FROM items WHERE title='宿舍小冰箱');

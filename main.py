@@ -16,6 +16,14 @@ STATIC_DIR = Path(__file__).parent / "static"
 # 发布一件闲置奖励的碳积分
 REWARD_PUBLISH = 10
 
+# 核心指标算法：单次流转的减碳量估算系数（kg CO₂e，按物品类别）
+CARBON_FACTOR = {"教材": 2.5, "考研": 2.0, "生活品": 3.5}
+
+
+def estimate_carbon(category: str) -> float:
+    """单次流转减碳量估算。"""
+    return CARBON_FACTOR.get(category, 2.0)
+
 
 def rows_to_dicts(rows) -> List[dict]:
     return [dict(r) for r in rows]
@@ -129,6 +137,70 @@ def redeem(payload: RedeemRequest) -> RedeemOut:
     conn.commit()
     conn.close()
     return RedeemOut(ok=True, message=f"成功兑换「{product['name']}」，请到学生会办公室领取", remaining_points=remaining)
+
+
+@app.get("/api/stats/summary")
+def stats_summary() -> dict:
+    """平台全局环保汇总指标。"""
+    conn = database.get_db()
+    total_published = conn.execute("SELECT COUNT(*) FROM items").fetchone()[0]
+    total_cycles = conn.execute("SELECT COALESCE(SUM(cycle_count), 0) FROM items").fetchone()[0]
+    total_carbon = conn.execute("SELECT COALESCE(SUM(carbon_saved), 0) FROM items").fetchone()[0]
+    total_users = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+    total_points = conn.execute("SELECT COALESCE(SUM(points), 0) FROM users").fetchone()[0]
+    conn.close()
+    return {
+        "total_published": total_published,
+        "total_cycles": total_cycles,
+        "total_carbon_kg": round(total_carbon, 2),
+        "total_users": total_users,
+        "total_points": total_points,
+        "trees_equivalent": round(total_carbon / 18.0, 1),  # 一棵树每年约吸收 18kg CO₂
+    }
+
+
+@app.get("/api/rank/users")
+def rank_users(limit: int = 10) -> List[dict]:
+    """全校环保先锋榜：按个人累计减碳量排序。"""
+    conn = database.get_db()
+    rows = conn.execute(
+        """
+        SELECT u.id, u.name, u.college, u.points,
+               COALESCE(SUM(i.cycle_count), 0) AS cycles,
+               COALESCE(SUM(i.carbon_saved), 0) AS carbon_kg
+        FROM users u LEFT JOIN items i ON i.owner_id = u.id
+        GROUP BY u.id
+        ORDER BY carbon_kg DESC, cycles DESC, u.points DESC
+        LIMIT ?
+        """,
+        (limit,),
+    ).fetchall()
+    conn.close()
+    return rows_to_dicts(rows)
+
+
+@app.get("/api/rank/colleges")
+def rank_colleges() -> List[dict]:
+    """学院减碳排行大屏数据。"""
+    conn = database.get_db()
+    rows = conn.execute(
+        """
+        SELECT u.college,
+               COUNT(DISTINCT u.id) AS members,
+               COALESCE(SUM(i.cycle_count), 0) AS cycles,
+               COALESCE(SUM(i.carbon_saved), 0) AS carbon_kg
+        FROM users u LEFT JOIN items i ON i.owner_id = u.id
+        GROUP BY u.college
+        ORDER BY carbon_kg DESC
+        """
+    ).fetchall()
+    conn.close()
+    data = rows_to_dicts(rows)
+    top = max((d["carbon_kg"] for d in data), default=0) or 1
+    for d in data:
+        d["carbon_kg"] = round(d["carbon_kg"], 2)
+        d["percent"] = round(d["carbon_kg"] / top * 100)
+    return data
 
 
 @app.get("/")

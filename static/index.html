@@ -152,8 +152,74 @@
       <div v-else class="bg-white rounded-2xl border border-emerald-100 shadow-sm p-16 text-center text-gray-400">请先在右上角选择身份</div>
     </section>
 
+    <!-- ===== 排行榜 ===== -->
+    <section v-show="activeTab === 'rank'">
+      <div class="flex flex-wrap items-center gap-3 mb-5">
+        <h2 class="text-xl font-bold text-gray-800">🌍 绿色循环大屏</h2>
+        <p class="text-sm text-gray-400">全校环保数据实时看板</p>
+      </div>
+
+      <div class="grid grid-cols-2 lg:grid-cols-5 gap-3 mb-6">
+        <div class="bg-white rounded-2xl border border-emerald-100 shadow-sm p-4 text-center">
+          <p class="text-2xl font-bold text-emerald-600">{{ summary.total_carbon_kg ?? '-' }}</p>
+          <p class="text-xs text-gray-400 mt-1">累计减碳（kg CO₂e）</p>
+        </div>
+        <div class="bg-white rounded-2xl border border-emerald-100 shadow-sm p-4 text-center">
+          <p class="text-2xl font-bold text-emerald-600">{{ summary.total_cycles ?? '-' }}</p>
+          <p class="text-xs text-gray-400 mt-1">累计循环流转（次）</p>
+        </div>
+        <div class="bg-white rounded-2xl border border-emerald-100 shadow-sm p-4 text-center">
+          <p class="text-2xl font-bold text-emerald-600">{{ summary.total_published ?? '-' }}</p>
+          <p class="text-xs text-gray-400 mt-1">上线闲置物品（件）</p>
+        </div>
+        <div class="bg-white rounded-2xl border border-emerald-100 shadow-sm p-4 text-center">
+          <p class="text-2xl font-bold text-emerald-600">{{ summary.total_users ?? '-' }}</p>
+          <p class="text-xs text-gray-400 mt-1">参与师生（人）</p>
+        </div>
+        <div class="bg-white rounded-2xl border border-emerald-100 shadow-sm p-4 text-center">
+          <p class="text-2xl font-bold text-emerald-600">{{ summary.trees_equivalent ?? '-' }}</p>
+          <p class="text-xs text-gray-400 mt-1">相当于植树（棵/年）</p>
+        </div>
+      </div>
+
+      <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        <div class="bg-white rounded-2xl border border-emerald-100 shadow-sm p-6">
+          <h3 class="font-bold text-gray-800 mb-4">🏆 全校环保先锋榜</h3>
+          <ul class="space-y-2">
+            <li v-for="(u, i) in userRank" :key="u.id" class="flex items-center gap-3 p-3 rounded-xl hover:bg-emerald-50 transition">
+              <span class="w-8 h-8 flex items-center justify-center rounded-full text-sm font-bold"
+                :class="['bg-amber-400 text-white', 'bg-gray-300 text-white', 'bg-orange-400 text-white'][i] ?? 'bg-emerald-50 text-emerald-600'">
+                {{ i < 3 ? ['🥇','🥈','🥉'][i] : i + 1 }}
+              </span>
+              <div class="flex-1">
+                <p class="text-sm font-semibold text-gray-800">{{ u.name }} <span class="text-xs text-gray-400 font-normal">{{ u.college }}</span></p>
+                <p class="text-[11px] text-gray-400">循环 {{ u.cycles }} 次 · 碳积分 {{ u.points }}</p>
+              </div>
+              <span class="text-sm font-bold text-emerald-600">{{ u.carbon_kg }} kg</span>
+            </li>
+          </ul>
+        </div>
+
+        <div class="bg-white rounded-2xl border border-emerald-100 shadow-sm p-6">
+          <h3 class="font-bold text-gray-800 mb-4">🏫 学院减碳排行</h3>
+          <ul class="space-y-4">
+            <li v-for="(c, i) in collegeRank" :key="c.college">
+              <div class="flex items-center justify-between text-sm mb-1">
+                <span class="font-medium text-gray-700">{{ i + 1 }}. {{ c.college }}</span>
+                <span class="text-emerald-600 font-bold">{{ c.carbon_kg }} kg</span>
+              </div>
+              <div class="h-3 rounded-full bg-emerald-50 overflow-hidden">
+                <div class="h-full rounded-full bg-gradient-to-r from-emerald-400 to-emerald-600 transition-all duration-700" :style="{ width: c.percent + '%' }"></div>
+              </div>
+              <p class="text-[11px] text-gray-400 mt-0.5">{{ c.members }} 名成员 · {{ c.cycles }} 次流转</p>
+            </li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
     <!-- ===== 占位 Tab ===== -->
-    <section v-for="t in tabs.filter(t => ['rank','admin'].includes(t.key))" :key="t.key" v-show="activeTab === t.key"
+    <section v-for="t in tabs.filter(t => ['admin'].includes(t.key))" :key="t.key" v-show="activeTab === t.key"
       class="bg-white rounded-2xl border border-emerald-100 shadow-sm p-16 text-center">
       <div class="text-5xl mb-4">{{ t.icon }}</div>
       <h2 class="text-lg font-bold text-gray-700">{{ t.name }}</h2>
@@ -228,6 +294,9 @@ createApp({
     const keyword = ref('');
     const products = ref([]);
     const pointLogs = ref([]);
+    const summary = ref({});
+    const userRank = ref([]);
+    const collegeRank = ref([]);
     const showPublish = ref(false);
     const publishing = ref(false);
     const publishError = ref('');
@@ -273,6 +342,17 @@ createApp({
       if (!currentUserId.value) return;
       const res = await fetch('/api/point-logs?user_id=' + currentUserId.value);
       pointLogs.value = await res.json();
+    }
+
+    async function loadRank() {
+      const [s, ur, cr] = await Promise.all([
+        fetch('/api/stats/summary').then(r => r.json()),
+        fetch('/api/rank/users').then(r => r.json()),
+        fetch('/api/rank/colleges').then(r => r.json()),
+      ]);
+      summary.value = s;
+      userRank.value = ur;
+      collegeRank.value = cr;
     }
 
     function openPublish() {
@@ -327,15 +407,17 @@ createApp({
       loadItems();
       loadProducts();
       loadPointLogs();
+      loadRank();
     });
 
     watch([currentUserId, activeTab], () => loadPointLogs());
+    watch(activeTab, t => { if (t === 'rank') loadRank(); });
 
     return {
       tabs, activeTab, users, currentUserId, me, items, itemsLoading,
       filterCategory, keyword, showPublish, publishing, publishError, form, toast,
-      products, pointLogs,
-      emoji, loadItems, openPublish, submitPublish, reserveItem, showToast, redeem,
+      products, pointLogs, summary, userRank, collegeRank,
+      emoji, loadItems, openPublish, submitPublish, reserveItem, showToast, redeem, loadRank,
     };
   },
 }).mount('#app');
