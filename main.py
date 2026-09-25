@@ -10,8 +10,9 @@ from fastapi.staticfiles import StaticFiles
 
 import database
 from models import (
-    Health, ItemCreate, ItemOut, OrderAction, OrderCreate, OrderOut,
-    PointLogOut, ProductOut, RedeemOut, RedeemRequest, UserOut,
+    AdminItemOut, Health, ItemCreate, ItemOut, OrderAction, OrderCreate, OrderOut,
+    PointLogOut, ProductOut, RedeemOut, RedeemRequest, ReportCreate, ReportOut,
+    UserAction, UserOut,
 )
 
 app = FastAPI(title="绿循校园", version="0.4.0")
@@ -347,6 +348,178 @@ def cancel_order(order_id: int, payload: OrderAction) -> dict:
     row = conn.execute(ORDER_SQL + " WHERE o.id = ?", (order_id,)).fetchone()
     conn.commit()
     conn.close()
+    return dict(row)
+
+
+def _require_admin(conn: sqlite3.Connection, user_id: int) -> sqlite3.Row:
+    """管理员权限校验。"""
+    user = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+    if not user or user["role"] != "admin":
+        conn.close()
+        raise HTTPException(status_code=403, detail="需要管理员权限")
+    return user
+
+
+@app.post("/api/reports", status_code=201)
+def create_report(payload: ReportCreate) -> dict:
+    """用户举报违规物品。"""
+    conn = database.get_db()
+    item = conn.execute("SELECT * FROM items WHERE id = ?", (payload.item_id,)).fetchone()
+    if not item:
+        conn.close()
+        raise HTTPException(status_code=404, detail="物品不存在")
+    cur = conn.execute(
+        "INSERT INTO reports (item_id, reporter_id, reason) VALUES (?, ?, ?)",
+        (payload.item_id, payload.reporter_id, payload.reason),
+    )
+    row = conn.execute("SELECT * FROM reports WHERE id = ?", (cur.lastrowid,)).fetchone()
+    conn.commit()
+    conn.close()
+    return dict(row)
+
+
+@app.get("/api/admin/summary")
+def admin_summary(user_id: int) -> dict:
+    """后台全局汇总数据卡片。"""
+    conn = database.get_db()
+    try:
+        _require_admin(conn, user_id)
+        orders_by_status = {
+            r["status"]: r["cnt"]
+            for r in conn.execute("SELECT status, COUNT(*) AS cnt FROM orders GROUP BY status").fetchall()
+        }
+        open_reports = conn.execute("SELECT COUNT(*) FROM reports WHERE status = 'open'").fetchone()[0]
+        flagged_items = conn.execute(
+            "SELECT COUNT(DISTINCT item_id) FROM reports WHERE status = 'open'"
+        ).fetchone()[0]
+    finally:
+        conn.close()
+    return {
+        **stats_summary(),
+        "orders_total": sum(orders_by_status.values()),
+        "orders_completed": orders_by_status.get("completed", 0),
+        "orders_active": sum(orders_by_status.get(s, 0) for s in ("reserved", "confirmed")),
+        "open_reports": open_reports,
+        "flagged_items": flagged_items,
+    }
+
+
+@app.get("/api/admin/items", response_model=List[AdminItemOut])
+def admin_items(user_id: int) -> List[dict]:
+    """管理员物品清单（含已下架），并附带未处理举报数。"""
+    conn = database.get_db()
+    try:
+        _require_admin(conn, user_id)
+        rows = conn.execute(
+            """
+            SELECT i.id, i.title, i.category, i.price, i.status, i.cycle_count, i.carbon_saved,
+                   u.name AS owner_name,
+                   (SELECT COUNT(*) FROM reports r WHERE r.item_id = i.id AND r.status = 'open') AS report_count
+            FROM items i JOIN users u ON u.id = i.owner_id
+            ORDER BY report_count DESC, i.id DESC
+            """
+        ).fetchall()
+    finally:
+        conn.close()
+    return rows_to_dicts(rows)
+
+
+@app.post("/api/admin/items/{item_id}/offshelf", response_model=AdminItemOut)
+def admin_offshelf(item_id: int, payload: UserAction) -> dict:
+    """管理员下架违规物品。"""
+    conn = database.get_db()
+    try:
+        _require_admin(conn, payload.user_id)
+        item = conn.execute("SELECT * FROM items WHERE id = ?", (item_id,)).fetchone()
+        if not item:
+            raise HTTPException(status_code=404, detail="物品不存在")
+        if item["status"] == "offshelf":
+            raise HTTPException(status_code=400, detail="物品已是下架状态")
+        conn.execute("UPDATE items SET status = 'offshelf' WHERE id = ?", (item_id,))
+        row = conn.execute(
+            """
+            SELECT i.*, u.name AS owner_name,
+                   (SELECT COUNT(*) FROM reports r WHERE r.item_id = i.id AND r.status = 'open') AS report_count
+            FROM items i JOIN users u ON u.id = i.owner_id WHERE i.id = ?
+            """,
+            (item_id,),
+        ).fetchone()
+        conn.commit()
+    finally:
+        conn.close()
+    return dict(row)
+
+
+@app.post("/api/admin/items/{item_id}/restore", response_model=AdminItemOut)
+def admin_restore(item_id: int, payload: UserAction) -> dict:
+    """管理员恢复上架（仅当无进行中订单时回到 available）。"""
+    conn = database.get_db()
+    try:
+        _require_admin(conn, payload.user_id)
+        item = conn.execute("SELECT * FROM items WHERE id = ?", (item_id,)).fetchone()
+        if not item:
+            raise HTTPException(status_code=404, detail="物品不存在")
+        if item["status"] != "offshelf":
+            raise HTTPException(status_code=400, detail="仅下架物品可恢复上架")
+        conn.execute("UPDATE items SET status = 'available' WHERE id = ?", (item_id,))
+        row = conn.execute(
+            """
+            SELECT i.*, u.name AS owner_name,
+                   (SELECT COUNT(*) FROM reports r WHERE r.item_id = i.id AND r.status = 'open') AS report_count
+            FROM items i JOIN users u ON u.id = i.owner_id WHERE i.id = ?
+            """,
+            (item_id,),
+        ).fetchone()
+        conn.commit()
+    finally:
+        conn.close()
+    return dict(row)
+
+
+@app.get("/api/admin/reports", response_model=List[ReportOut])
+def admin_reports(user_id: int, status: Optional[str] = None) -> List[dict]:
+    """管理员查看举报列表。"""
+    conn = database.get_db()
+    try:
+        _require_admin(conn, user_id)
+        sql = """
+            SELECT r.*, i.title AS item_title, u.name AS reporter_name
+            FROM reports r JOIN items i ON i.id = r.item_id JOIN users u ON u.id = r.reporter_id
+        """
+        params: list = []
+        if status:
+            sql += " WHERE r.status = ?"
+            params.append(status)
+        sql += " ORDER BY r.id DESC"
+        rows = conn.execute(sql, params).fetchall()
+    finally:
+        conn.close()
+    return rows_to_dicts(rows)
+
+
+@app.post("/api/admin/reports/{report_id}/resolve", response_model=ReportOut)
+def admin_resolve_report(report_id: int, payload: UserAction) -> dict:
+    """管理员处理完结举报。"""
+    conn = database.get_db()
+    try:
+        _require_admin(conn, payload.user_id)
+        report = conn.execute("SELECT * FROM reports WHERE id = ?", (report_id,)).fetchone()
+        if not report:
+            raise HTTPException(status_code=404, detail="举报不存在")
+        if report["status"] == "resolved":
+            raise HTTPException(status_code=400, detail="该举报已处理")
+        conn.execute("UPDATE reports SET status = 'resolved' WHERE id = ?", (report_id,))
+        row = conn.execute(
+            """
+            SELECT r.*, i.title AS item_title, u.name AS reporter_name
+            FROM reports r JOIN items i ON i.id = r.item_id JOIN users u ON u.id = r.reporter_id
+            WHERE r.id = ?
+            """,
+            (report_id,),
+        ).fetchone()
+        conn.commit()
+    finally:
+        conn.close()
     return dict(row)
 
 

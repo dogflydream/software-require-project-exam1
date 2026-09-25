@@ -86,3 +86,16 @@ CREATE TABLE IF NOT EXISTS orders (
 -- 种子数据：一条已确认待自提的订单（演示履约流程）
 UPDATE items SET status = 'reserved' WHERE title = '《数据结构（C语言版）》严蔚敏' AND status = 'available';
 INSERT INTO orders (item_id, buyer_id, seller_id, status, pickup_code) SELECT 1, 4, 2, 'confirmed', 'GC-2026-0001' WHERE NOT EXISTS (SELECT 1 FROM orders);
+
+-- 绿循校园 数据库结构（增量 5：违规举报与后台审核）
+CREATE TABLE IF NOT EXISTS reports (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    item_id INTEGER NOT NULL REFERENCES items(id),
+    reporter_id INTEGER NOT NULL REFERENCES users(id),
+    reason TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'open',           -- open / resolved
+    created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+);
+
+-- 种子数据：一条待处理举报
+INSERT INTO reports (item_id, reporter_id, reason) SELECT 6, 5, '物品描述与实物不符，疑似损坏' WHERE NOT EXISTS (SELECT 1 FROM reports);
