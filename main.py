@@ -1,4 +1,6 @@
 """绿循校园——校园闲置教材与物品循环流转系统。"""
+import secrets
+import sqlite3
 from pathlib import Path
 from typing import List, Optional
 
@@ -7,14 +9,32 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 import database
-from models import Health, ItemCreate, ItemOut, PointLogOut, ProductOut, RedeemOut, RedeemRequest, UserOut
+from models import (
+    Health, ItemCreate, ItemOut, OrderAction, OrderCreate, OrderOut,
+    PointLogOut, ProductOut, RedeemOut, RedeemRequest, UserOut,
+)
 
-app = FastAPI(title="绿循校园", version="0.2.0")
+app = FastAPI(title="绿循校园", version="0.4.0")
 
 STATIC_DIR = Path(__file__).parent / "static"
 
 # 发布一件闲置奖励的碳积分
 REWARD_PUBLISH = 10
+# 完成一次流转奖励卖家的碳积分
+REWARD_CYCLE = 20
+
+# 订单状态机：当前状态 -> 允许扭转的目标状态
+ORDER_TRANSITIONS = {
+    "reserved": {"confirmed", "cancelled"},
+    "confirmed": {"completed", "cancelled"},
+}
+
+STATUS_LABEL = {
+    "reserved": "已预约",
+    "confirmed": "待自提",
+    "completed": "已完成",
+    "cancelled": "已取消",
+}
 
 # 核心指标算法：单次流转的减碳量估算系数（kg CO₂e，按物品类别）
 CARBON_FACTOR = {"教材": 2.5, "考研": 2.0, "生活品": 3.5}
@@ -201,6 +221,133 @@ def rank_colleges() -> List[dict]:
         d["carbon_kg"] = round(d["carbon_kg"], 2)
         d["percent"] = round(d["carbon_kg"] / top * 100)
     return data
+
+
+ORDER_SQL = """
+    SELECT o.*, i.title AS item_title, i.price,
+           b.name AS buyer_name, s.name AS seller_name
+    FROM orders o
+    JOIN items i ON i.id = o.item_id
+    JOIN users b ON b.id = o.buyer_id
+    JOIN users s ON s.id = o.seller_id
+"""
+
+
+def _transition(conn, order_id: int, from_status: str, to_status: str) -> sqlite3.Row:
+    """带状态机校验的订单状态扭转。"""
+    order = conn.execute("SELECT * FROM orders WHERE id = ?", (order_id,)).fetchone()
+    if not order:
+        conn.close()
+        raise HTTPException(status_code=404, detail="订单不存在")
+    if order["status"] != from_status:
+        conn.close()
+        raise HTTPException(status_code=400, detail=f"订单状态为「{STATUS_LABEL[order['status']]}」，不能执行该操作")
+    if to_status not in ORDER_TRANSITIONS.get(from_status, set()):
+        conn.close()
+        raise HTTPException(status_code=400, detail=f"不允许从「{STATUS_LABEL[from_status]}」流转到「{STATUS_LABEL[to_status]}」")
+    conn.execute("UPDATE orders SET status = ?, updated_at = datetime('now','localtime') WHERE id = ?", (to_status, order_id))
+    return order
+
+
+@app.get("/api/orders", response_model=List[OrderOut])
+def list_orders(user_id: int) -> List[dict]:
+    """某用户相关的订单（我是买家或我是卖家）。"""
+    conn = database.get_db()
+    rows = conn.execute(
+        ORDER_SQL + " WHERE o.buyer_id = ? OR o.seller_id = ? ORDER BY o.id DESC",
+        (user_id, user_id),
+    ).fetchall()
+    conn.close()
+    return rows_to_dicts(rows)
+
+
+@app.post("/api/orders", response_model=OrderOut, status_code=201)
+def create_order(payload: OrderCreate) -> dict:
+    """买家发起预约意向：物品 available -> reserved，订单进入 reserved。"""
+    conn = database.get_db()
+    item = conn.execute("SELECT * FROM items WHERE id = ?", (payload.item_id,)).fetchone()
+    if not item:
+        conn.close()
+        raise HTTPException(status_code=404, detail="物品不存在")
+    if item["owner_id"] == payload.buyer_id:
+        conn.close()
+        raise HTTPException(status_code=400, detail="不能预约自己发布的物品")
+    if item["status"] != "available":
+        conn.close()
+        raise HTTPException(status_code=400, detail="该物品当前不可预约")
+    code = f"GC-{secrets.token_hex(3).upper()}"
+    cur = conn.execute(
+        "INSERT INTO orders (item_id, buyer_id, seller_id, status, pickup_code) VALUES (?, ?, ?, 'reserved', ?)",
+        (payload.item_id, payload.buyer_id, item["owner_id"], code),
+    )
+    conn.execute("UPDATE items SET status = 'reserved' WHERE id = ?", (payload.item_id,))
+    row = conn.execute(ORDER_SQL + " WHERE o.id = ?", (cur.lastrowid,)).fetchone()
+    conn.commit()
+    conn.close()
+    return dict(row)
+
+
+@app.post("/api/orders/{order_id}/confirm", response_model=OrderOut)
+def confirm_order(order_id: int, payload: OrderAction) -> dict:
+    """卖家确认预约意向：reserved -> confirmed（约定线下验货自提）。"""
+    conn = database.get_db()
+    order = _transition(conn, order_id, "reserved", "confirmed")
+    if payload.user_id != order["seller_id"]:
+        conn.rollback()
+        conn.close()
+        raise HTTPException(status_code=403, detail="只有卖家可以确认预约")
+    row = conn.execute(ORDER_SQL + " WHERE o.id = ?", (order_id,)).fetchone()
+    conn.commit()
+    conn.close()
+    return dict(row)
+
+
+@app.post("/api/orders/{order_id}/complete", response_model=OrderOut)
+def complete_order(order_id: int, payload: OrderAction) -> dict:
+    """线下验货自提后确认完成流转：confirmed -> completed。
+    物品循环度 +1、累计减碳量增加、卖家获得碳积分奖励。"""
+    conn = database.get_db()
+    order = conn.execute("SELECT * FROM orders WHERE id = ?", (order_id,)).fetchone()
+    if not order:
+        conn.close()
+        raise HTTPException(status_code=404, detail="订单不存在")
+    if payload.user_id not in (order["buyer_id"], order["seller_id"]):
+        conn.close()
+        raise HTTPException(status_code=403, detail="只有订单参与方可以确认完成")
+    if payload.pickup_code != order["pickup_code"]:
+        conn.close()
+        raise HTTPException(status_code=400, detail="自提码不正确")
+    _transition(conn, order_id, "confirmed", "completed")
+    item = conn.execute("SELECT * FROM items WHERE id = ?", (order["item_id"],)).fetchone()
+    carbon = estimate_carbon(item["category"])
+    conn.execute(
+        "UPDATE items SET status = 'completed', cycle_count = cycle_count + 1, carbon_saved = carbon_saved + ? WHERE id = ?",
+        (carbon, order["item_id"]),
+    )
+    database.add_points(conn, order["seller_id"], REWARD_CYCLE, f"完成流转《{item['title']}》获得碳积分")
+    row = conn.execute(ORDER_SQL + " WHERE o.id = ?", (order_id,)).fetchone()
+    conn.commit()
+    conn.close()
+    return dict(row)
+
+
+@app.post("/api/orders/{order_id}/cancel", response_model=OrderOut)
+def cancel_order(order_id: int, payload: OrderAction) -> dict:
+    """取消订单，物品回到 available。"""
+    conn = database.get_db()
+    order = conn.execute("SELECT * FROM orders WHERE id = ?", (order_id,)).fetchone()
+    if not order:
+        conn.close()
+        raise HTTPException(status_code=404, detail="订单不存在")
+    if payload.user_id not in (order["buyer_id"], order["seller_id"]):
+        conn.close()
+        raise HTTPException(status_code=403, detail="只有订单参与方可以取消")
+    _transition(conn, order_id, order["status"], "cancelled")
+    conn.execute("UPDATE items SET status = 'available' WHERE id = ?", (order["item_id"],))
+    row = conn.execute(ORDER_SQL + " WHERE o.id = ?", (order_id,)).fetchone()
+    conn.commit()
+    conn.close()
+    return dict(row)
 
 
 @app.get("/")

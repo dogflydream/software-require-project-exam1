@@ -148,6 +148,42 @@
             </li>
           </ul>
         </div>
+
+        <div class="lg:col-span-3 bg-white rounded-2xl border border-emerald-100 shadow-sm p-6">
+          <div class="flex items-center gap-2 mb-4">
+            <h3 class="font-bold text-gray-800">🔄 我的循环订单</h3>
+            <div class="flex gap-1 ml-3 bg-gray-50 rounded-full p-1">
+              <button @click="orderView = 'buy'" class="px-3 py-1 rounded-full text-xs transition"
+                :class="orderView === 'buy' ? 'bg-emerald-600 text-white' : 'text-gray-500'">我买到的</button>
+              <button @click="orderView = 'sell'" class="px-3 py-1 rounded-full text-xs transition"
+                :class="orderView === 'sell' ? 'bg-emerald-600 text-white' : 'text-gray-500'">我卖出的</button>
+            </div>
+          </div>
+          <div v-if="myOrders.length === 0" class="text-sm text-gray-400 py-8 text-center">暂无订单，去市集逛逛吧～</div>
+          <ul v-else class="divide-y divide-gray-100">
+            <li v-for="o in myOrders" :key="o.id" class="py-3 flex flex-wrap items-center gap-3">
+              <div class="flex-1 min-w-[200px]">
+                <p class="text-sm font-medium text-gray-800">{{ o.item_title }} <span class="text-gray-400 text-xs">¥{{ o.price.toFixed(2) }}</span></p>
+                <p class="text-[11px] text-gray-400">
+                  {{ orderView === 'buy' ? '卖家 ' + o.seller_name : '买家 ' + o.buyer_name }} ·
+                  自提码 <span class="font-mono text-emerald-700 bg-emerald-50 px-1 rounded">{{ o.pickup_code }}</span> · {{ o.updated_at }}
+                </p>
+              </div>
+              <span class="px-2.5 py-1 rounded-full text-xs font-medium"
+                :class="{'bg-amber-100 text-amber-700': o.status==='reserved', 'bg-blue-100 text-blue-700': o.status==='confirmed', 'bg-emerald-100 text-emerald-700': o.status==='completed', 'bg-gray-100 text-gray-500': o.status==='cancelled'}">
+                {{ statusLabel(o.status) }}
+              </span>
+              <div class="flex gap-2">
+                <button v-if="o.status==='reserved' && orderView==='sell'" @click="orderAction(o, 'confirm')"
+                  class="px-3 py-1.5 rounded-full bg-emerald-600 hover:bg-emerald-700 text-white text-xs">确认预约</button>
+                <button v-if="o.status==='confirmed'" @click="orderAction(o, 'complete')"
+                  class="px-3 py-1.5 rounded-full bg-blue-600 hover:bg-blue-700 text-white text-xs">完成流转</button>
+                <button v-if="['reserved','confirmed'].includes(o.status)" @click="orderAction(o, 'cancel')"
+                  class="px-3 py-1.5 rounded-full bg-gray-100 hover:bg-gray-200 text-gray-500 text-xs">取消</button>
+              </div>
+            </li>
+          </ul>
+        </div>
       </div>
       <div v-else class="bg-white rounded-2xl border border-emerald-100 shadow-sm p-16 text-center text-gray-400">请先在右上角选择身份</div>
     </section>
@@ -297,6 +333,8 @@ createApp({
     const summary = ref({});
     const userRank = ref([]);
     const collegeRank = ref([]);
+    const orders = ref([]);
+    const orderView = ref('buy');
     const showPublish = ref(false);
     const publishing = ref(false);
     const publishError = ref('');
@@ -313,6 +351,45 @@ createApp({
     }
 
     function emoji(category) { return ({ '教材': '📚', '考研': '✏️', '生活品': '🛒' })[category] || '📦'; }
+    function statusLabel(s) { return ({ reserved: '已预约', confirmed: '待自提', completed: '已完成', cancelled: '已取消' })[s] || s; }
+    const myOrders = computed(() => orders.value.filter(o => orderView.value === 'buy' ? o.buyer_id === currentUserId.value : o.seller_id === currentUserId.value));
+
+    async function loadOrders() {
+      if (!currentUserId.value) return;
+      const res = await fetch('/api/orders?user_id=' + currentUserId.value);
+      orders.value = await res.json();
+    }
+
+    async function createOrder(it) {
+      if (!me.value) return showToast('请先选择身份', 'error');
+      const res = await fetch('/api/orders', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ item_id: it.id, buyer_id: currentUserId.value }),
+      });
+      const data = await res.json();
+      if (!res.ok) return showToast(data.detail || '预约失败', 'error');
+      showToast(`预约成功！请线下联系卖家验货，自提码：${data.pickup_code}`);
+      loadItems();
+      loadOrders();
+      loadUsers();
+    }
+
+    async function orderAction(o, action) {
+      const res = await fetch(`/api/orders/${o.id}/${action}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ user_id: currentUserId.value, pickup_code: o.pickup_code }),
+      });
+      const data = await res.json();
+      if (!res.ok) return showToast(data.detail || '操作失败', 'error');
+      showToast(action === 'complete' ? '流转完成！循环度 +1，卖家获得 20 碳积分 🌿' : '订单状态已更新');
+      loadOrders();
+      loadItems();
+      loadUsers();
+      loadPointLogs();
+      loadRank();
+    }
 
     async function loadUsers() {
       const res = await fetch('/api/users');
@@ -384,7 +461,7 @@ createApp({
     }
 
     async function reserveItem(it) {
-      showToast('预约功能将在增量 4（订单流转）中开放 🚧', 'error');
+      await createOrder(it);
     }
 
     async function redeem(p) {
@@ -410,14 +487,14 @@ createApp({
       loadRank();
     });
 
-    watch([currentUserId, activeTab], () => loadPointLogs());
+    watch([currentUserId, activeTab], () => { loadPointLogs(); loadOrders(); });
     watch(activeTab, t => { if (t === 'rank') loadRank(); });
 
     return {
       tabs, activeTab, users, currentUserId, me, items, itemsLoading,
       filterCategory, keyword, showPublish, publishing, publishError, form, toast,
-      products, pointLogs, summary, userRank, collegeRank,
-      emoji, loadItems, openPublish, submitPublish, reserveItem, showToast, redeem, loadRank,
+      products, pointLogs, summary, userRank, collegeRank, orders, orderView, myOrders,
+      emoji, statusLabel, loadItems, openPublish, submitPublish, reserveItem, showToast, redeem, loadRank, orderAction,
     };
   },
 }).mount('#app');

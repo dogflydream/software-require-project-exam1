@@ -70,3 +70,19 @@ INSERT INTO items (owner_id, title, category, description, price, status, cycle_
 INSERT INTO items (owner_id, title, category, description, price, status, cycle_count, carbon_saved) SELECT 4, '旧自行车（已循环）', '生活品', '已完成1次流转', 150.0, 'completed', 1, 3.5 WHERE NOT EXISTS (SELECT 1 FROM items WHERE title='旧自行车（已循环）');
 INSERT INTO items (owner_id, title, category, description, price, status, cycle_count, carbon_saved) SELECT 5, '《新概念英语》全套', '教材', '已完成2次流转', 30.0, 'completed', 2, 5.0 WHERE NOT EXISTS (SELECT 1 FROM items WHERE title='《新概念英语》全套');
 INSERT INTO items (owner_id, title, category, description, price, status, cycle_count, carbon_saved) SELECT 2, '宿舍小冰箱', '生活品', '已完成1次流转', 199.0, 'completed', 1, 3.5 WHERE NOT EXISTS (SELECT 1 FROM items WHERE title='宿舍小冰箱');
+
+-- 绿循校园 数据库结构（增量 4：订单与线下自提履约）
+CREATE TABLE IF NOT EXISTS orders (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    item_id INTEGER NOT NULL REFERENCES items(id),
+    buyer_id INTEGER NOT NULL REFERENCES users(id),
+    seller_id INTEGER NOT NULL REFERENCES users(id),
+    status TEXT NOT NULL DEFAULT 'reserved',       -- reserved / confirmed / completed / cancelled
+    pickup_code TEXT NOT NULL,                     -- 线下自提码
+    created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+);
+
+-- 种子数据：一条已确认待自提的订单（演示履约流程）
+UPDATE items SET status = 'reserved' WHERE title = '《数据结构（C语言版）》严蔚敏' AND status = 'available';
+INSERT INTO orders (item_id, buyer_id, seller_id, status, pickup_code) SELECT 1, 4, 2, 'confirmed', 'GC-2026-0001' WHERE NOT EXISTS (SELECT 1 FROM orders);

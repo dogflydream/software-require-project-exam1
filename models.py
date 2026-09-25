@@ -26,6 +26,31 @@ class RedeemRequest(BaseModel):
     product_id: int
 
 
+class OrderCreate(BaseModel):
+    item_id: int
+    buyer_id: int
+
+
+class OrderOut(BaseModel):
+    id: int
+    item_id: int
+    item_title: str = ""
+    buyer_id: int
+    buyer_name: str = ""
+    seller_id: int
+    seller_name: str = ""
+    status: str
+    pickup_code: str
+    price: float = 0
+    created_at: str
+    updated_at: str
+
+
+class OrderAction(BaseModel):
+    user_id: int
+    pickup_code: Optional[str] = None
+
+
 class RedeemOut(BaseModel):
     ok: bool
     message: str
