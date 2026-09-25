@@ -4,9 +4,247 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>绿循校园 — 校园闲置教材与物品循环流转系统</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: { extend: { colors: { brand: { 50:'#ecfdf5',100:'#d1fae5',500:'#10b981',600:'#059669',700:'#047857' } } } }
+    }
+  </script>
+  <script src="https://unpkg.com/vue@3.4.27/dist/vue.global.prod.js"></script>
+  <style>
+    [v-cloak]{display:none}
+    .fade-enter-active,.fade-leave-active{transition:opacity .2s}
+    .fade-enter-from,.fade-leave-to{opacity:0}
+  </style>
 </head>
-<body>
-  <h1>绿循校园</h1>
-  <p>脚手架已就绪，等待增量 1。</p>
+<body class="bg-gradient-to-b from-brand-50 via-white to-white min-h-screen text-gray-800">
+<div id="app" v-cloak>
+
+  <!-- 顶部导航 -->
+  <header class="sticky top-0 z-40 backdrop-blur bg-white/80 border-b border-emerald-100 shadow-sm">
+    <div class="max-w-6xl mx-auto px-4 py-3 flex flex-wrap items-center gap-3">
+      <div class="flex items-center gap-2 mr-4">
+        <span class="text-2xl">🌿</span>
+        <div>
+          <h1 class="text-lg font-bold text-emerald-700 leading-tight">绿循校园</h1>
+          <p class="text-[11px] text-gray-400 leading-tight">闲置循环 · 碳积分 · 绿色校园</p>
+        </div>
+      </div>
+      <nav class="flex items-center gap-1 overflow-x-auto">
+        <button v-for="t in tabs" :key="t.key" @click="activeTab = t.key"
+          class="px-4 py-2 rounded-full text-sm font-medium transition whitespace-nowrap"
+          :class="activeTab === t.key ? 'bg-emerald-600 text-white shadow' : 'text-gray-500 hover:bg-emerald-50 hover:text-emerald-700'">
+          {{ t.icon }} {{ t.name }}
+        </button>
+      </nav>
+      <div class="ml-auto flex items-center gap-2">
+        <span class="hidden sm:inline text-xs text-gray-400">当前身份</span>
+        <select v-model.number="currentUserId" class="text-sm border border-emerald-200 rounded-lg px-2 py-1.5 bg-white focus:outline-none focus:ring-2 focus:ring-emerald-400">
+          <option v-for="u in users" :key="u.id" :value="u.id">{{ u.name }}（{{ u.role === 'admin' ? '管理员' : u.college }}）</option>
+        </select>
+        <span class="px-2.5 py-1 rounded-full bg-amber-100 text-amber-700 text-xs font-semibold">碳积分 {{ me ? me.points : 0 }}</span>
+      </div>
+    </div>
+  </header>
+
+  <main class="max-w-6xl mx-auto px-4 py-6">
+
+    <!-- ===== 市集 ===== -->
+    <section v-show="activeTab === 'market'">
+      <div class="flex flex-wrap items-center gap-3 mb-5">
+        <h2 class="text-xl font-bold text-gray-800">绿色市集</h2>
+        <div class="flex gap-1 bg-white rounded-full p-1 shadow-sm border border-emerald-100">
+          <button v-for="c in ['全部','教材','考研','生活品']" :key="c" @click="filterCategory = (c==='全部' ? '' : c)"
+            class="px-3 py-1.5 rounded-full text-sm transition"
+            :class="(filterCategory || '全部') === c ? 'bg-emerald-600 text-white' : 'text-gray-500 hover:text-emerald-700'">{{ c }}</button>
+        </div>
+        <div class="flex-1 min-w-[180px] relative">
+          <input v-model.trim="keyword" @input="loadItems" placeholder="搜索闲置…" class="w-full pl-9 pr-3 py-2 text-sm rounded-full border border-emerald-200 focus:outline-none focus:ring-2 focus:ring-emerald-400 bg-white">
+          <span class="absolute left-3 top-2.5 text-gray-400 text-sm">🔍</span>
+        </div>
+        <button @click="openPublish" class="px-4 py-2 rounded-full bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-semibold shadow transition">＋ 发布闲置</button>
+      </div>
+
+      <div v-if="itemsLoading" class="text-center text-gray-400 py-16">加载中…</div>
+      <div v-else-if="items.length === 0" class="text-center text-gray-400 py-16">暂无符合条件的闲置物品</div>
+      <div v-else class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+        <div v-for="it in items" :key="it.id" class="bg-white rounded-2xl border border-emerald-100 shadow-sm hover:shadow-lg hover:-translate-y-0.5 transition p-4 flex flex-col">
+          <div class="flex items-start justify-between gap-2">
+            <span class="text-3xl">{{ emoji(it.category) }}</span>
+            <div class="flex flex-col items-end gap-1">
+              <span class="px-2 py-0.5 rounded-full text-xs font-medium bg-emerald-50 text-emerald-700 border border-emerald-100">{{ it.category }}</span>
+              <span v-if="it.status==='reserved'" class="px-2 py-0.5 rounded-full text-xs bg-amber-100 text-amber-700">已预约</span>
+              <span class="text-[11px] text-gray-400">♻️ 循环度 {{ it.cycle_count }}</span>
+            </div>
+          </div>
+          <h3 class="mt-2 font-semibold text-gray-800 leading-snug">{{ it.title }}</h3>
+          <p class="mt-1 text-sm text-gray-500 flex-1 line-clamp-2">{{ it.description || '（暂无描述）' }}</p>
+          <div class="mt-3 flex items-end justify-between">
+            <div>
+              <span class="text-emerald-700 font-bold text-lg">¥{{ it.price.toFixed(2) }}</span>
+              <p class="text-[11px] text-gray-400 mt-0.5">{{ it.owner_name }} · {{ it.owner_college }}</p>
+            </div>
+            <button v-if="me && it.owner_id !== me.id && it.status==='available'"
+              @click="reserveItem(it)"
+              class="px-3 py-1.5 rounded-full bg-emerald-50 border border-emerald-200 text-emerald-700 text-sm hover:bg-emerald-100 transition">预约意向</button>
+            <span v-else-if="me && it.owner_id === me.id" class="text-xs text-gray-400">我发布的</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===== 占位 Tab ===== -->
+    <section v-for="t in tabs.filter(t => ['mall','rank','profile','admin'].includes(t.key))" :key="t.key" v-show="activeTab === t.key"
+      class="bg-white rounded-2xl border border-emerald-100 shadow-sm p-16 text-center">
+      <div class="text-5xl mb-4">{{ t.icon }}</div>
+      <h2 class="text-lg font-bold text-gray-700">{{ t.name }}</h2>
+      <p class="text-sm text-gray-400 mt-2">该模块将在后续增量中开放，敬请期待 🚧</p>
+    </section>
+  </main>
+
+  <footer class="text-center text-xs text-gray-400 py-8">绿循校园 GreenCampus · 软件工程实验项目 · 增量模型开发</footer>
+
+  <!-- 发布闲置弹窗 -->
+  <transition name="fade">
+    <div v-if="showPublish" class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40" @click.self="showPublish = false">
+      <div class="bg-white rounded-2xl shadow-xl w-full max-w-md p-6">
+        <h3 class="text-lg font-bold text-gray-800 mb-4">发布闲置物品</h3>
+        <div class="space-y-3">
+          <div>
+            <label class="text-sm text-gray-500">物品名称</label>
+            <input v-model.trim="form.title" placeholder="例如：《数据结构》教材" class="mt-1 w-full border border-emerald-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-400">
+          </div>
+          <div class="grid grid-cols-2 gap-3">
+            <div>
+              <label class="text-sm text-gray-500">分类</label>
+              <select v-model="form.category" class="mt-1 w-full border border-emerald-200 rounded-lg px-3 py-2 text-sm bg-white">
+                <option>教材</option><option>考研</option><option>生活品</option>
+              </select>
+            </div>
+            <div>
+              <label class="text-sm text-gray-500">价格（元）</label>
+              <input v-model.number="form.price" type="number" min="0" step="0.1" class="mt-1 w-full border border-emerald-200 rounded-lg px-3 py-2 text-sm">
+            </div>
+          </div>
+          <div>
+            <label class="text-sm text-gray-500">描述</label>
+            <textarea v-model.trim="form.description" rows="3" placeholder="成色、使用时长、自提地点…" class="mt-1 w-full border border-emerald-200 rounded-lg px-3 py-2 text-sm"></textarea>
+          </div>
+          <p v-if="publishError" class="text-sm text-red-500">{{ publishError }}</p>
+          <div class="flex justify-end gap-2 pt-2">
+            <button @click="showPublish = false" class="px-4 py-2 rounded-full text-sm text-gray-500 hover:bg-gray-100">取消</button>
+            <button @click="submitPublish" :disabled="publishing" class="px-5 py-2 rounded-full bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-semibold disabled:opacity-50">{{ publishing ? '发布中…' : '确认发布' }}</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </transition>
+
+  <!-- 全局提示 -->
+  <transition name="fade">
+    <div v-if="toast" class="fixed bottom-6 left-1/2 -translate-x-1/2 z-50 px-5 py-2.5 rounded-full text-sm text-white shadow-lg"
+      :class="toast.type === 'error' ? 'bg-red-500' : 'bg-emerald-600'">{{ toast.text }}</div>
+  </transition>
+</div>
+
+<script>
+const { createApp, ref, computed, onMounted } = Vue;
+
+createApp({
+  setup() {
+    const tabs = [
+      { key: 'market',  name: '市集',     icon: '🛍️' },
+      { key: 'mall',    name: '商城',     icon: '🎁' },
+      { key: 'rank',    name: '排行榜',   icon: '🏆' },
+      { key: 'profile', name: '个人中心', icon: '👤' },
+      { key: 'admin',   name: '后台管理', icon: '🛡️' },
+    ];
+
+    const activeTab = ref('market');
+    const users = ref([]);
+    const currentUserId = ref(null);
+    const items = ref([]);
+    const itemsLoading = ref(false);
+    const filterCategory = ref('');
+    const keyword = ref('');
+    const showPublish = ref(false);
+    const publishing = ref(false);
+    const publishError = ref('');
+    const form = ref({ title: '', category: '教材', description: '', price: 0 });
+    const toast = ref(null);
+
+    const me = computed(() => users.value.find(u => u.id === currentUserId.value) || null);
+
+    let toastTimer = null;
+    function showToast(text, type = 'ok') {
+      toast.value = { text, type };
+      clearTimeout(toastTimer);
+      toastTimer = setTimeout(() => (toast.value = null), 2500);
+    }
+
+    function emoji(category) { return ({ '教材': '📚', '考研': '✏️', '生活品': '🛒' })[category] || '📦'; }
+
+    async function loadUsers() {
+      const res = await fetch('/api/users');
+      users.value = await res.json();
+      if (currentUserId.value == null && users.value.length) currentUserId.value = users.value[0].id;
+    }
+
+    async function loadItems() {
+      itemsLoading.value = true;
+      try {
+        const params = new URLSearchParams();
+        if (filterCategory.value) params.set('category', filterCategory.value);
+        if (keyword.value) params.set('keyword', keyword.value);
+        const res = await fetch('/api/items?' + params.toString());
+        items.value = await res.json();
+      } finally {
+        itemsLoading.value = false;
+      }
+    }
+
+    function openPublish() {
+      if (!me.value) return showToast('请先选择身份', 'error');
+      form.value = { title: '', category: '教材', description: '', price: 0 };
+      publishError.value = '';
+      showPublish.value = true;
+    }
+
+    async function submitPublish() {
+      publishError.value = '';
+      if (!form.value.title) { publishError.value = '请填写物品名称'; return; }
+      publishing.value = true;
+      try {
+        const res = await fetch('/api/items', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ...form.value, owner_id: currentUserId.value }),
+        });
+        if (!res.ok) { const e = await res.json(); publishError.value = e.detail || '发布失败'; return; }
+        showPublish.value = false;
+        showToast('发布成功！你的闲置已上架市集 🌿');
+        loadItems();
+      } finally {
+        publishing.value = false;
+      }
+    }
+
+    async function reserveItem(it) {
+      showToast('预约功能将在增量 4（订单流转）中开放 🚧', 'error');
+    }
+
+    onMounted(async () => {
+      await loadUsers();
+      loadItems();
+    });
+
+    return {
+      tabs, activeTab, users, currentUserId, me, items, itemsLoading,
+      filterCategory, keyword, showPublish, publishing, publishError, form, toast,
+      emoji, loadItems, openPublish, submitPublish, reserveItem, showToast,
+    };
+  },
+}).mount('#app');
+</script>
 </body>
 </html>
