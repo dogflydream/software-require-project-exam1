@@ -1,0 +1,29 @@
+@startuml
+skinparam defaultFontName "Microsoft YaHei"
+skinparam dpi 150
+skinparam shadowing false
+skinparam sequence {
+  ArrowColor #334155
+  LifeLineBorderColor #94A3B8
+  ParticipantBackgroundColor #F0FDF4
+  ParticipantBorderColor #166534
+}
+actor "买家" as B
+participant "前端页面\n(Vue SPA)" as FE
+participant "API 服务\n(main.py)" as API
+database "SQLite\ncampus.db" as DB
+B -> FE : 点击「预约意向」
+FE -> API : POST /api/orders\n{item_id, buyer_id}
+API -> DB : SELECT 物品记录
+DB --> API : 物品(status, owner_id)
+alt 物品 available 且非自购物品
+  API -> API : 生成自提码\ngc = "GC-" + token_hex(3)
+  API -> DB : INSERT 订单(status=reserved)\nUPDATE 物品(status=reserved)
+  DB --> API : 同一事务提交成功
+  API --> FE : 201 订单 JSON（含 pickup_code）
+  FE --> B : Toast「预约成功，自提码 GC-XXXXXX」
+else 物品不可预约 / 预约自己的物品
+  API --> FE : 400「该物品当前不可预约」\n400「不能预约自己发布的物品」
+  FE --> B : Toast 显示失败原因
+end
+@enduml

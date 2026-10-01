@@ -1,0 +1,67 @@
+@startuml
+skinparam defaultFontName "Microsoft YaHei"
+skinparam dpi 150
+skinparam shadowing false
+skinparam classAttributeIconSize 0
+skinparam class {
+  BackgroundColor #FFFFFF
+  BorderColor #1E3A5F
+  ArrowColor #334155
+}
+class User {
+  -id : int «PK»
+  -name : string
+  -studentNo : string «unique»
+  -college : string
+  -role : {student, admin}
+  -points : int
+  +addPoints(delta, reason) : int
+  +isAdmin() : bool
+}
+class Item {
+  -id : int «PK»
+  -ownerId : int «FK»
+  -title : string
+  -category : {教材, 考研, 生活品}
+  -price : real
+  -status : {available, reserved, completed, offshelf}
+  -cycleCount : int
+  -carbonSaved : real
+  +completeCycle(carbonKg)
+}
+class Order {
+  -id : int «PK»
+  -itemId : int «FK»
+  -buyerId : int «FK»
+  -sellerId : int «FK»
+  -status : {reserved, confirmed, completed, cancelled}
+  -pickupCode : string
+  +transition(target) : bool
+  +verifyPickupCode(code) : bool
+}
+class PointLog {
+  -id : int «PK»
+  -userId : int «FK»
+  -delta : int
+  -reason : string
+}
+class Product {
+  -id : int «PK»
+  -name : string
+  -costPoints : int
+  -stock : int
+}
+class Report {
+  -id : int «PK»
+  -itemId : int «FK»
+  -reporterId : int «FK»
+  -reason : string
+  -status : {open, resolved}
+}
+User "1" -- "0..*" Item : 发布 >
+User "1" -- "0..*" PointLog : 记账 >
+User "1" -- "0..*" Order : 买家/卖家 >
+Item "1" -- "0..*" Order : 标的 >
+Item "1" -- "0..*" Report : 被举报 >
+User "1" -- "0..*" Report : 举报 >
+@enduml

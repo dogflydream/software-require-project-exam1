@@ -1,0 +1,56 @@
+@startuml
+skinparam defaultFontName "Microsoft YaHei"
+skinparam dpi 150
+skinparam shadowing false
+skinparam usecase {
+  BackgroundColor #F0FDF4
+  BorderColor #166534
+  ArrowColor #334155
+}
+left to right direction
+actor "学生买家" as Buyer
+actor "学生卖家" as Seller
+actor "注册用户" as User
+actor "系统管理员" as Admin
+Buyer -|> User
+Seller -|> User
+
+rectangle "绿循校园——闲置教材与物品循环流转系统" {
+  usecase "选择当前身份（登录）" as UC0
+  usecase "浏览/检索闲置物品\n（分类筛选、关键词搜索）" as UC1
+  usecase "查看环保先锋榜/学院排行" as UC2
+  usecase "发布闲置物品" as UC3
+  usecase "获得碳积分（+10）" as UC3a
+  usecase "发起预约意向" as UC4
+  usecase "确认预约（卖家）" as UC5
+  usecase "确认完成流转" as UC6
+  usecase "校验自提码" as UC6a
+  usecase "获得碳积分（+20）" as UC6b
+  usecase "取消订单" as UC7
+  usecase "查看碳积分流水" as UC8
+  usecase "兑换积分商城礼品" as UC9
+  usecase "举报违规物品" as UC10
+  usecase "物品下架/恢复上架" as UC11
+  usecase "查看/处理违规举报" as UC12
+  usecase "查看平台全局汇总" as UC13
+}
+
+User --> UC0
+User --> UC1
+User --> UC2
+User --> UC8
+Seller --> UC3
+Seller --> UC5
+Buyer --> UC4
+Buyer --> UC9
+User --> UC7
+User --> UC10
+Admin --> UC11
+Admin --> UC12
+Admin --> UC13
+
+UC3 ..> UC3a : <<include>>
+UC6 ..> UC6a : <<include>>
+UC6 ..> UC6b : <<include>>
+UC7 ..> UC4 : <<extend>>
+@enduml

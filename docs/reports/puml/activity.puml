@@ -1,0 +1,43 @@
+@startuml
+skinparam defaultFontName "Microsoft YaHei"
+skinparam dpi 150
+skinparam shadowing false
+skinparam activity {
+  BackgroundColor #F0FDF4
+  BorderColor #166534
+  ArrowColor #334155
+  DiamondBackgroundColor #FEF9C3
+  DiamondBorderColor #A16207
+}
+start
+:买家浏览市集，选定闲置物品;
+if (物品状态为 available ?) then (是)
+  :生成自提码 GC-XXXXXX;
+  :订单置为 reserved\n物品同步锁定;
+  if (卖家确认预约 ?) then (是)
+    :订单置为 confirmed（待自提）;
+    :买卖双方线下验货;
+    repeat
+      :买家或卖家输入自提码，发起确认完成;
+      backward :提示「自提码不正确」，请重新输入;
+    repeat while (自提码与订单 pickup_code 一致 ?) is (否) not (是)
+    fork
+      :订单与物品状态更新为 completed;
+      :循环度 cycle_count + 1;
+      :减碳量按类别累加 carbon_saved;
+    fork again
+      :卖家碳积分 +20;
+      :写入积分流水 point_logs;
+    end fork
+    :同一事务提交，前端刷新统计大屏;
+    stop
+  else (取消)
+    :订单置为 cancelled;
+    :物品回滚为 available;
+    stop
+  endif
+else (否)
+  :提示「该物品当前不可预约」;
+  stop
+endif
+@enduml

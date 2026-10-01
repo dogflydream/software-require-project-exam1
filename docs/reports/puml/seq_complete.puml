@@ -1,0 +1,32 @@
+@startuml
+skinparam defaultFontName "Microsoft YaHei"
+skinparam dpi 150
+skinparam shadowing false
+skinparam sequence {
+  ArrowColor #334155
+  LifeLineBorderColor #94A3B8
+  ParticipantBackgroundColor #F0FDF4
+  ParticipantBorderColor #166534
+}
+actor "买家 / 卖家" as U
+participant "前端页面\n(Vue SPA)" as FE
+participant "API 服务\n(main.py)" as API
+database "SQLite\ncampus.db" as DB
+U -> FE : 点击「完成流转」
+FE -> API : POST /api/orders/{id}/complete\n{user_id, pickup_code}
+API -> DB : SELECT 订单
+DB --> API : 订单(confirmed, pickup_code)
+alt 非订单参与方
+  API --> FE : 403「只有订单参与方可以确认完成」
+else 自提码不正确
+  API --> FE : 400「自提码不正确」
+else 校验通过（confirmed 状态）
+  API -> DB : UPDATE 订单(status=completed)
+  API -> DB : UPDATE 物品(status=completed,\ncycle_count+1, carbon_saved+估算值)
+  API -> DB : UPDATE 卖家(points+20)\nINSERT point_logs
+  DB --> API : 同一事务提交成功
+  API --> FE : 200 订单 JSON（completed）
+  FE --> U : Toast「流转完成！循环度 +1，卖家 +20 碳积分」
+  FE -> API : 刷新积分/排行榜数据
+end
+@enduml

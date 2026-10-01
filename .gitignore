@@ -4,3 +4,7 @@ __pycache__/
 *.db
 campus.db
 .DS_Store
+
+# 实验报告构建产物
+docs/reports/render/
+docs/reports/plantuml.jar
