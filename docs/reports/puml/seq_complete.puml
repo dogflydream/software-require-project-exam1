@@ -9,24 +9,24 @@ skinparam sequence {
   ParticipantBorderColor #166534
 }
 actor "买家 / 卖家" as U
-participant "前端页面\n(Vue SPA)" as FE
-participant "API 服务\n(main.py)" as API
-database "SQLite\ncampus.db" as DB
+participant "前端页面" as FE
+participant "后台服务" as API
+database "数据库" as DB
 U -> FE : 点击「完成流转」
-FE -> API : POST /api/orders/{id}/complete\n{user_id, pickup_code}
-API -> DB : SELECT 订单
+FE -> API : 提交确认完成请求\n{user_id, pickup_code}
+API -> DB : 查询订单
 DB --> API : 订单(confirmed, pickup_code)
 alt 非订单参与方
-  API --> FE : 403「只有订单参与方可以确认完成」
+  API --> FE : 提示「只有订单参与方可以确认完成」
 else 自提码不正确
-  API --> FE : 400「自提码不正确」
+  API --> FE : 提示「自提码不正确」
 else 校验通过（confirmed 状态）
-  API -> DB : UPDATE 订单(status=completed)
-  API -> DB : UPDATE 物品(status=completed,\ncycle_count+1, carbon_saved+估算值)
-  API -> DB : UPDATE 卖家(points+20)\nINSERT point_logs
-  DB --> API : 同一事务提交成功
-  API --> FE : 200 订单 JSON（completed）
-  FE --> U : Toast「流转完成！循环度 +1，卖家 +20 碳积分」
-  FE -> API : 刷新积分/排行榜数据
+  API -> DB : 更新订单(status=completed)
+  API -> DB : 更新物品(status=completed,\ncycle_count+1, carbon_saved+估算值)
+  API -> DB : 卖家碳积分 +20\n写入积分流水
+  DB --> API : 一次性提交成功
+  API --> FE : 返回订单信息（completed）
+  FE --> U : 提示「流转完成！循环度 +1，卖家 +20 碳积分」
+  FE -> API : 刷新积分与排行数据
 end
 @enduml
