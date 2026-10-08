@@ -15,6 +15,7 @@ class User {
   -college : string
   -role : {student, admin}
   -points : int
+  -createdAt : datetime
   +addPoints(delta, reason) : int
   +isAdmin() : bool
 }
@@ -23,10 +24,12 @@ class Item {
   -ownerId : int «FK»
   -title : string
   -category : {教材, 考研, 生活品}
+  -description : string
   -price : real
   -status : {available, reserved, completed, offshelf}
   -cycleCount : int
   -carbonSaved : real
+  -createdAt : datetime
   +completeCycle(carbonKg)
 }
 class Order {
@@ -36,6 +39,8 @@ class Order {
   -sellerId : int «FK»
   -status : {reserved, confirmed, completed, cancelled}
   -pickupCode : string
+  -createdAt : datetime
+  -updatedAt : datetime
   +transition(target) : bool
   +verifyPickupCode(code) : bool
 }
@@ -44,12 +49,15 @@ class PointLog {
   -userId : int «FK»
   -delta : int
   -reason : string
+  -createdAt : datetime
 }
 class Product {
   -id : int «PK»
   -name : string
+  -description : string
   -costPoints : int
   -stock : int
+  -emoji : string
 }
 class Report {
   -id : int «PK»
@@ -57,6 +65,7 @@ class Report {
   -reporterId : int «FK»
   -reason : string
   -status : {open, resolved}
+  -createdAt : datetime
 }
 User "1" -- "0..*" Item : 发布 >
 User "1" -- "0..*" PointLog : 记账 >
