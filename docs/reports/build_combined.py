@@ -13,7 +13,7 @@ from docx.shared import Cm, Pt
 sys.path.insert(0, str(Path(__file__).parent))
 from build_reports import (  # noqa: E402
     BUILDERS, collapse_empty_paras, fill_cell, set_run_font, shade_cell,
-    TEMPLATE, report1, report2, report3, report4, report5,
+    replace_exp1_tables, TEMPLATE, report1, report2, report3, report4, report5,
 )
 
 BASE = Path(__file__).parent
@@ -51,9 +51,15 @@ def info_table(doc):
     return t
 
 
+def body_children(doc):
+    """正文子元素（排除末尾 sectPr）。"""
+    return [el for el in doc.element.body if el.tag != qn("w:sectPr")]
+
+
 def build():
     doc = docx.Document(str(TEMPLATE))
     collapse_empty_paras(doc)
+    replace_exp1_tables(doc)
     body = doc.element.body
 
     # 1) 定位五个“实验报告”要求段与“实验一”标题段
@@ -83,12 +89,14 @@ def build():
     body.remove(spacer._p)
     exp1_p._p.addprevious(spacer._p)
 
-    # 3) 在每个“实验报告”要求段之后填入对应内容
+    # 3) 在每个“实验报告”要求段之后填入对应内容。
+    #    构建器一律向文档尾部追加，故新增元素 = 插入后尾部多出的部分（不做 id 比对，
+    #    避免 lxml 代理对象地址复用导致既有元素被误判为新元素而搬走）。
     for n, builder in BUILDERS_ALL.items():
         p = instr[n]
-        before = set(id(el) for el in list(body))
+        n_before = len(body_children(doc))
         builder(doc)
-        new_els = [el for el in list(body) if id(el) not in before]
+        new_els = body_children(doc)[n_before:]
         for el in reversed(new_els):
             p._p.addnext(el)
 
