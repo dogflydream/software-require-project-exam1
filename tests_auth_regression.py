@@ -23,6 +23,18 @@ class Client:
         self.jar = http.cookiejar.CookieJar()
         self.opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(self.jar))
 
+    def raw_status(self, method, path, body=None):
+        """只返回 HTTP 状态码，不参与通过/失败统计（用于并发场景）。"""
+        data = json.dumps(body).encode() if body is not None else None
+        req = urllib.request.Request(BASE + enc(path), data=data, method=method)
+        if data:
+            req.add_header("Content-Type", "application/json")
+        try:
+            with self.opener.open(req, timeout=20) as r:
+                return r.status
+        except urllib.error.HTTPError as e:
+            return e.code
+
     def call(self, method, path, body=None, expect=200, label=""):
         global passed, failed
         data = json.dumps(body).encode() if body is not None else None
@@ -269,6 +281,117 @@ stu2.call("POST", f"/api/admin/items/{iid}/review", {"approve": True}, expect=40
 
 # 清理：删除测试分类前需先清空引用
 cat.call("DELETE", f"/api/admin/categories/{created['id']}", expect=400, label="仍有物品引用时不可删分类")
+
+print("=" * 80)
+print("十三、并发预约竞态（防超卖）")
+import threading
+
+
+def login_client(login_name):
+    c = Client()
+    c.call("POST", "/api/auth/login", {"login": login_name, "password": "campus123"}, expect=200)
+    return c
+
+
+race_owner = login_client("20230101")
+race_buyers = [login_client(x) for x in ("20230205", "20230312", "20230418")]
+race_bad = 0
+ROUNDS = 5
+for rnd in range(ROUNDS):
+    it = race_owner.call("POST", "/api/items",
+                         {"title": f"并发用例{rnd}", "category": "教材", "price": 1}, expect=201)
+    iid = it["id"]
+    codes = []
+    barrier = threading.Barrier(len(race_buyers))
+
+    def attempt(c, item_id):
+        barrier.wait()  # 尽量同时发起，制造真实竞争
+        codes.append(c.raw_status("POST", "/api/orders", {"item_id": item_id}))
+
+    threads = [threading.Thread(target=attempt, args=(c, iid)) for c in race_buyers]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    if codes.count(201) != 1:
+        race_bad += 1
+
+race_ok = race_bad == 0
+print(f"        {'PASS' if race_ok else 'FAIL'} {ROUNDS} 轮并发预约均只有 1 人成功（异常 {race_bad} 轮）")
+passed, failed = passed + race_ok, failed + (not race_ok)
+
+print("=" * 80)
+print("十四、审核状态拦截交易入口")
+pend_owner = login_client("20230101")
+pend_buyer = login_client("20230205")
+pit = pend_owner.call("POST", "/api/items",
+                      {"title": "待审拦截用例", "category": "教材", "price": 1}, expect=201)
+pend_owner.call("PATCH", f"/api/items/{pit['id']}", {"price": 2}, expect=200, label="编辑转待审")
+pend_buyer.call("POST", "/api/orders", {"item_id": pit["id"]}, expect=400, label="预约待审物品被拒")
+pend_buyer.call("POST", "/api/favorites", {"item_id": pit["id"]}, expect=400, label="收藏待审物品被拒")
+
+print("=" * 80)
+print("十五、联系方式仅对交易对方可见")
+ct_owner = login_client("20230101")
+ct_buyer = login_client("20230205")
+ct_owner.call("PATCH", "/api/users/me", {"contact": "wx: test_owner"}, expect=200, label="物主填写联系方式")
+ct_item = ct_owner.call("POST", "/api/items",
+                        {"title": "联系方式用例", "category": "教材", "price": 1}, expect=201)
+ct_order = ct_buyer.call("POST", "/api/orders", {"item_id": ct_item["id"]}, expect=201, label="买家预约")
+buyer_contact = ct_order.get("counterparty_contact")
+print(f"        {'PASS' if buyer_contact == 'wx: test_owner' else 'FAIL'} 买家可见卖家联系方式（{buyer_contact}）")
+passed, failed = passed + (buyer_contact == "wx: test_owner"), failed + (buyer_contact != "wx: test_owner")
+
+ct_third = login_client("20230418")
+third_orders = ct_third.call("GET", "/api/orders", expect=200, label="第三方订单列表")
+leak = any(o["id"] == ct_order["id"] for o in third_orders)
+print(f"        {'PASS' if not leak else 'FAIL'} 非参与方看不到该订单")
+passed, failed = passed + (not leak), failed + leak
+
+print("=" * 80)
+print("十六、登录失败限流")
+throttle = Client()
+codes_seq = [throttle.raw_status("POST", "/api/auth/login",
+                                 {"login": "20230312", "password": "definitely-wrong"}) for _ in range(6)]
+locked = codes_seq[-1] == 429 and codes_seq[:5] == [401] * 5
+print(f"        {'PASS' if locked else 'FAIL'} 连续失败后被限流（序列 {codes_seq}）")
+passed, failed = passed + locked, failed + (not locked)
+throttle.call("POST", "/api/auth/login", {"login": "20230312", "password": "campus123"}, expect=429,
+              label="锁定期间正确密码也被拒")
+
+print("=" * 80)
+print("十七、管理员重置密码（含解除锁定）")
+rp_admin = login_client("A000000")
+rp_users = rp_admin.call("GET", "/api/admin/users", expect=200, label="管理员读用户")
+rp_uid = next(u["id"] for u in rp_users if u.get("student_no") == "20230312")
+rp_admin.call("POST", f"/api/admin/users/{rp_uid}/password", {"new_password": "reset12345"},
+              expect=200, label="重置密码")
+rp_client = Client()
+rp_client.call("POST", "/api/auth/login", {"login": "20230312", "password": "reset12345"},
+               expect=200, label="用新密码登录成功（锁定已解除）")
+rp_client.call("POST", "/api/auth/login", {"login": "20230312", "password": "campus123"},
+               expect=401, label="旧密码已失效")
+stu_reset = login_client("20230205")
+stu_reset.call("POST", f"/api/admin/users/{rp_uid}/password", {"new_password": "hack12345"},
+               expect=403, label="学生不能重置他人密码")
+
+print("=" * 80)
+print("十八、我的举报与统计口径")
+rep_client = login_client("20230205")
+rep_item = rep_client.call("POST", "/api/items",
+                           {"title": "举报进度用例", "category": "教材", "price": 1}, expect=201)
+other = login_client("20230418")
+other.call("POST", "/api/reports", {"item_id": rep_item["id"], "reason": "举报进度测试理由"},
+           expect=201, label="提交举报")
+mine_reports = other.call("GET", "/api/reports/mine", expect=200, label="我的举报")
+has_rep = any(r["item_id"] == rep_item["id"] for r in mine_reports)
+print(f"        {'PASS' if has_rep else 'FAIL'} 可查看自己举报的处理进度")
+passed, failed = passed + has_rep, failed + (not has_rep)
+
+summ = Client().call("GET", "/api/stats/summary", expect=200, label="统计汇总")
+has_pending = "pending_items" in summ
+print(f"        {'PASS' if has_pending else 'FAIL'} 汇总区分待审物品（pending_items={summ.get('pending_items')}）")
+passed, failed = passed + has_pending, failed + (not has_pending)
 
 print("=" * 80)
 print(f"结果：通过 {passed}，失败 {failed}")

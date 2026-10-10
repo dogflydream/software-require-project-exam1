@@ -100,3 +100,61 @@ def require_admin(user: dict = Depends(current_user)) -> dict:
     if user.get("role") != "admin":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="需要管理员权限")
     return user
+
+# ---------------- 登录失败限流 ----------------
+MAX_LOGIN_FAILS = 5          # 连续失败次数上限
+LOCK_MINUTES = 15            # 达到上限后锁定时长（分钟）
+
+
+def check_login_allowed(conn, identifier: str) -> None:
+    """检查该登录名是否处于锁定状态；未锁定则放行。"""
+    row = conn.execute(
+        "SELECT fail_count, locked_until FROM login_attempts WHERE identifier = ?", (identifier,)
+    ).fetchone()
+    if not row or not row["locked_until"]:
+        return
+    if row["locked_until"] > datetime.now().strftime("%Y-%m-%d %H:%M:%S"):
+        remaining = _minutes_left(row["locked_until"])
+        raise HTTPException(
+            status_code=429,
+            detail=f"登录失败次数过多，请 {remaining} 分钟后再试",
+        )
+    # 锁定已到期，重置计数
+    conn.execute(
+        "UPDATE login_attempts SET fail_count = 0, locked_until = NULL WHERE identifier = ?",
+        (identifier,),
+    )
+
+
+def record_login_failure(conn, identifier: str) -> None:
+    """累计失败次数，达到上限则锁定一段时间。"""
+    row = conn.execute(
+        "SELECT fail_count FROM login_attempts WHERE identifier = ?", (identifier,)
+    ).fetchone()
+    count = (row["fail_count"] if row else 0) + 1
+    locked_until = None
+    if count >= MAX_LOGIN_FAILS:
+        locked_until = (datetime.now() + timedelta(minutes=LOCK_MINUTES)).strftime("%Y-%m-%d %H:%M:%S")
+    conn.execute(
+        """
+        INSERT INTO login_attempts (identifier, fail_count, locked_until, last_fail_at)
+        VALUES (?, ?, ?, datetime('now','localtime'))
+        ON CONFLICT(identifier) DO UPDATE SET
+            fail_count = excluded.fail_count,
+            locked_until = excluded.locked_until,
+            last_fail_at = excluded.last_fail_at
+        """,
+        (identifier, count, locked_until),
+    )
+
+
+def clear_login_failures(conn, identifier: str) -> None:
+    conn.execute("DELETE FROM login_attempts WHERE identifier = ?", (identifier,))
+
+
+def _minutes_left(locked_until: str) -> int:
+    try:
+        delta = datetime.strptime(locked_until, "%Y-%m-%d %H:%M:%S") - datetime.now()
+        return max(1, int(delta.total_seconds() // 60) + 1)
+    except ValueError:
+        return LOCK_MINUTES

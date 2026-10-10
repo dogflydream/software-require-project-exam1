@@ -50,6 +50,11 @@ class PasswordChange(BaseModel):
     new_password: str = Field(min_length=6, max_length=64)
 
 
+class AdminPasswordReset(BaseModel):
+    """管理员为用户重置密码（用户忘记密码时使用）。"""
+    new_password: str = Field(min_length=6, max_length=64)
+
+
 # ---------- 用户 ----------
 class UserOut(BaseModel):
     id: int
@@ -192,6 +197,9 @@ class OrderOut(BaseModel):
     buyer_name: str = ""
     seller_id: int
     seller_name: str = ""
+    # 交易对方的联系方式：仅订单参与方可见，用于线下履约联系（非参与方为 None）
+    counterparty_name: Optional[str] = None
+    counterparty_contact: Optional[str] = None
     status: str
     pickup_code: str
     price: float = 0

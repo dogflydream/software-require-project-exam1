@@ -46,6 +46,16 @@ const rejectTarget = ref(null)
 const rejectNote = ref('')
 const rejectErr = ref('')
 
+// 重置密码弹窗
+const resetTarget = ref(null)
+const resetPwd = ref('')
+const resetErr = ref('')
+const resetting = ref(false)
+
+// 订单分页
+const orderLimit = 50
+const orderOffset = ref(0)
+
 const tabs = computed(() => [
   { key: 'items', label: '物品审核', icon: 'box', badge: summary.value.pending_review || 0 },
   { key: 'reports', label: '举报处理', icon: 'flag', badge: summary.value.open_reports || 0 },
@@ -69,7 +79,7 @@ async function loadAll() {
   try {
     const [s, i, u, o, p, c] = await Promise.all([
       api.get('/api/admin/summary'), api.get('/api/admin/items'),
-      api.get('/api/admin/users'), api.get('/api/admin/orders'),
+      api.get('/api/admin/users'), api.get(`/api/admin/orders?limit=${orderLimit}&offset=${orderOffset.value}`),
       api.get('/api/products'), api.get('/api/categories'),
     ])
     summary.value = s; items.value = i; users.value = u
@@ -79,6 +89,36 @@ async function loadAll() {
     ui.toast(e.message, 'error')
   } finally {
     loading.value = false
+  }
+}
+
+/** 订单分页：后端分页，避免一次拉取全量。 */
+async function loadOrders() {
+  try {
+    orders.value = await api.get(`/api/admin/orders?limit=${orderLimit}&offset=${orderOffset.value}`)
+  } catch (e) { ui.toast(e.message, 'error') }
+}
+function orderNext() { orderOffset.value += orderLimit; loadOrders() }
+function orderPrev() { orderOffset.value = Math.max(0, orderOffset.value - orderLimit); loadOrders() }
+
+/* ---------- 重置密码 ---------- */
+function openResetPwd(u) {
+  resetTarget.value = u
+  resetPwd.value = ''
+  resetErr.value = ''
+}
+async function submitResetPwd() {
+  if (resetPwd.value.length < 6) { resetErr.value = '新密码至少 6 位'; return }
+  resetting.value = true
+  try {
+    const r = await api.post(`/api/admin/users/${resetTarget.value.id}/password`, { new_password: resetPwd.value })
+    ui.toast(r.message)
+    resetTarget.value = null
+    await loadAll()
+  } catch (e) {
+    resetErr.value = e.message
+  } finally {
+    resetting.value = false
   }
 }
 async function loadReports() {
@@ -386,6 +426,15 @@ onMounted(loadAll)
             </tbody>
           </table>
         </div>
+        <div class="flex items-center justify-between mt-4 pt-4 border-t border-line">
+          <p class="text-[12px] text-subtle tnum">第 {{ orderOffset + 1 }}–{{ orderOffset + orders.length }} 条</p>
+          <div class="flex gap-2">
+            <button type="button" :disabled="orderOffset === 0" @click="orderPrev"
+                    class="h-9 px-3.5 rounded-xl border border-line text-sm font-medium text-ink hover:bg-canvas disabled:opacity-40 disabled:cursor-not-allowed transition-colors">上一页</button>
+            <button type="button" :disabled="orders.length < orderLimit" @click="orderNext"
+                    class="h-9 px-3.5 rounded-xl border border-line text-sm font-medium text-ink hover:bg-canvas disabled:opacity-40 disabled:cursor-not-allowed transition-colors">下一页</button>
+          </div>
+        </div>
       </div>
 
       <!-- 用户 -->
@@ -396,6 +445,7 @@ onMounted(loadAll)
               <th class="py-2.5 font-medium">用户</th><th class="py-2.5 font-medium">学院</th><th class="py-2.5 font-medium">角色</th>
               <th class="py-2.5 font-medium text-right">发布</th><th class="py-2.5 font-medium text-right">循环</th>
               <th class="py-2.5 font-medium text-right">减碳</th><th class="py-2.5 font-medium text-right">积分</th>
+              <th class="py-2.5 font-medium text-right">操作</th>
             </tr></thead>
             <tbody class="divide-y divide-line">
               <tr v-for="u in users" :key="u.id" class="hover:bg-canvas/70 transition-colors">
@@ -414,7 +464,13 @@ onMounted(loadAll)
                 <td class="py-3 pr-3 text-right tnum text-muted">{{ u.item_count }}</td>
                 <td class="py-3 pr-3 text-right tnum text-muted">{{ u.cycles }}</td>
                 <td class="py-3 pr-3 text-right tnum font-semibold text-brand-700 dark:text-brand-400">{{ u.carbon_kg.toFixed(1) }}</td>
-                <td class="py-3 text-right tnum font-semibold text-amber-600">{{ u.points }}</td>
+                <td class="py-3 pr-3 text-right tnum font-semibold text-amber-600">{{ u.points }}</td>
+                <td class="py-3 text-right whitespace-nowrap">
+                  <button type="button" @click="openResetPwd(u)"
+                          class="h-8 px-2.5 rounded-lg border border-line text-xs text-muted hover:text-ink hover:bg-canvas transition-colors inline-flex items-center gap-1">
+                    <Icon name="lock" :size="13" />重置密码
+                  </button>
+                </td>
               </tr>
             </tbody>
           </table>
@@ -626,6 +682,39 @@ onMounted(loadAll)
               <button type="button" @click="rejectTarget = null" class="h-10 px-4 rounded-xl text-sm font-medium text-muted hover:bg-canvas transition-colors">取消</button>
               <button type="button" @click="submitReject"
                       class="h-10 px-5 rounded-xl bg-red-600 hover:bg-red-700 text-white text-sm font-semibold transition-colors">确认驳回</button>
+            </div>
+          </div>
+        </transition>
+      </div>
+    </transition>
+
+    <!-- 重置密码 -->
+    <transition name="fade">
+      <div v-if="resetTarget" class="fixed inset-0 z-50 bg-black/50 backdrop-blur-sm flex items-end sm:items-center justify-center p-0 sm:p-4"
+           @click.self="resetTarget = null">
+        <transition name="sheet" appear>
+          <div class="w-full sm:max-w-md bg-elevated rounded-t-2xl sm:rounded-2xl shadow-lift" role="dialog" aria-modal="true">
+            <div class="flex items-center justify-between px-5 py-4 border-b border-line">
+              <h3 class="font-semibold text-ink">重置用户密码</h3>
+              <button type="button" @click="resetTarget = null" aria-label="关闭"
+                      class="grid place-items-center w-8 h-8 rounded-lg text-muted hover:text-ink hover:bg-canvas transition-colors"><Icon name="close" :size="18" /></button>
+            </div>
+            <div class="p-5">
+              <p class="text-sm text-muted">用户：<b class="text-ink">{{ resetTarget.name }}</b>
+                <span v-if="resetTarget.student_no" class="text-subtle">（{{ resetTarget.student_no }}）</span>
+              </p>
+              <p class="mt-2 p-3 rounded-xl bg-amber-50 dark:bg-amber-400/10 text-[12px] text-amber-700 dark:text-amber-300 leading-relaxed">
+                重置后该用户的全部登录会话将失效、登录锁定一并解除，请将新密码告知本人。
+              </p>
+              <label for="reset-pwd" class="block text-[13px] font-medium text-ink mt-4 mb-1.5">新密码（至少 6 位）</label>
+              <input id="reset-pwd" v-model="resetPwd" type="text" maxlength="64" placeholder="输入新密码"
+                     class="w-full h-11 px-3.5 rounded-xl bg-canvas border border-line text-sm text-ink placeholder:text-subtle focus:outline-none focus:ring-2 focus:ring-brand-500/40" />
+              <p v-if="resetErr" class="mt-1 text-[12px] text-rose-500">{{ resetErr }}</p>
+            </div>
+            <div class="flex justify-end gap-2 px-5 py-4 border-t border-line">
+              <button type="button" @click="resetTarget = null" class="h-10 px-4 rounded-xl text-sm font-medium text-muted hover:bg-canvas transition-colors">取消</button>
+              <button type="button" @click="submitResetPwd" :disabled="resetting"
+                      class="h-10 px-5 rounded-xl bg-brand-600 hover:bg-brand-700 text-white text-sm font-semibold disabled:opacity-50 transition-colors">{{ resetting ? '重置中…' : '确认重置' }}</button>
             </div>
           </div>
         </transition>

@@ -31,8 +31,8 @@ import auth
 import database
 from auth import SESSION_COOKIE, SESSION_DAYS, current_user, hash_password, require_admin, verify_password
 from models import (
-    AdminItemOut, CategoryCreate, CategoryOut, CategoryUpdate, FavoriteOut, Health,
-    ItemCreate, ItemDetailOut, ItemOut, ItemUpdate, LoginRequest, OrderAction, OrderCreate,
+    AdminItemOut, AdminPasswordReset, CategoryCreate, CategoryOut, CategoryUpdate, FavoriteOut,
+    Health, ItemCreate, ItemDetailOut, ItemOut, ItemUpdate, LoginRequest, OrderAction, OrderCreate,
     OrderOut, PasswordChange, PointLogOut, ProductCreate, ProductOut, ProductUpdate,
     ProfileUpdate, RedeemOut, RedeemRequest, RegisterRequest, ReportCreate, ReportOut,
     ReviewAction, UserOut, UserPublic,
@@ -217,15 +217,31 @@ def register(payload: RegisterRequest, response: Response) -> dict:
 
 @app.post("/api/auth/login", response_model=UserOut)
 def login(payload: LoginRequest, response: Response) -> dict:
-    """学号或姓名 + 密码登录。失败提示不区分账号是否存在，避免账号枚举。"""
+    """学号或姓名 + 密码登录。
+
+    失败提示不区分账号是否存在，避免账号枚举；连续失败达上限则临时锁定，
+    防止暴力破解。
+    """
+    identifier = payload.login.strip()
+
+    # 先在独立事务中检查锁定状态（读取后即提交，避免与后续失败计数互相干扰）
     with database.db_session() as conn:
+        auth.check_login_allowed(conn, identifier)
         row = conn.execute(
             "SELECT * FROM users WHERE student_no = ? OR name = ? ORDER BY id LIMIT 1",
-            (payload.login, payload.login),
+            (identifier, identifier),
         ).fetchone()
-        if not row or not verify_password(payload.password, row["password_hash"]):
-            raise HTTPException(status_code=401, detail="学号/姓名或密码不正确")
-        token = auth.create_session(conn, row["id"])
+        ok = bool(row) and verify_password(payload.password, row["password_hash"])
+        if ok:
+            auth.clear_login_failures(conn, identifier)
+            token = auth.create_session(conn, row["id"])
+
+    if not ok:
+        # 失败计数必须独立提交：上面的会话若以异常结束会回滚，导致计数丢失
+        with database.db_session() as conn:
+            auth.record_login_failure(conn, identifier)
+        raise HTTPException(status_code=401, detail="学号/姓名或密码不正确")
+
     set_session_cookie(response, token)
     return dict(row)
 
@@ -606,9 +622,11 @@ def add_favorite(payload: dict, user: dict = Depends(current_user)) -> dict:
     if not isinstance(item_id, int):
         raise HTTPException(status_code=422, detail="参数「item_id」不合法：应为整数")
     with database.db_session() as conn:
-        item = conn.execute("SELECT 1 FROM items WHERE id = ?", (item_id,)).fetchone()
+        item = conn.execute("SELECT review_status FROM items WHERE id = ?", (item_id,)).fetchone()
         if not item:
             raise HTTPException(status_code=404, detail="物品不存在")
+        if item["review_status"] != "approved":
+            raise HTTPException(status_code=400, detail="该物品尚未通过审核，暂不可收藏")
         if conn.execute("SELECT 1 FROM favorites WHERE user_id = ? AND item_id = ?", (user["id"], item_id)).fetchone():
             raise HTTPException(status_code=400, detail="已收藏该物品")
         cur = conn.execute("INSERT INTO favorites (user_id, item_id) VALUES (?, ?)", (user["id"], item_id))
@@ -676,15 +694,30 @@ def redeem(payload: RedeemRequest, user: dict = Depends(current_user)) -> Redeem
 # 统计与排行
 # =======================================================================
 def stats_summary() -> dict:
+    """平台全局环保汇总指标。
+
+    统计口径与「市集可见」保持一致：仅计入已通过审核的物品，避免看板数字
+    高于用户实际能看到的物品总量；待审/驳回物品单独计数。
+    """
     with database.db_session() as conn:
-        total_published = conn.execute("SELECT COUNT(*) FROM items").fetchone()[0]
-        total_cycles = conn.execute("SELECT COALESCE(SUM(cycle_count), 0) FROM items").fetchone()[0]
-        total_carbon = conn.execute("SELECT COALESCE(SUM(carbon_saved), 0) FROM items").fetchone()[0]
+        total_published = conn.execute(
+            "SELECT COUNT(*) FROM items WHERE review_status = 'approved'"
+        ).fetchone()[0]
+        pending_items = conn.execute(
+            "SELECT COUNT(*) FROM items WHERE review_status != 'approved'"
+        ).fetchone()[0]
+        total_cycles = conn.execute(
+            "SELECT COALESCE(SUM(cycle_count), 0) FROM items WHERE review_status = 'approved'"
+        ).fetchone()[0]
+        total_carbon = conn.execute(
+            "SELECT COALESCE(SUM(carbon_saved), 0) FROM items WHERE review_status = 'approved'"
+        ).fetchone()[0]
         total_users = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
         total_points = conn.execute("SELECT COALESCE(SUM(points), 0) FROM users").fetchone()[0]
         total_orders = conn.execute("SELECT COUNT(*) FROM orders").fetchone()[0]
     return {
         "total_published": total_published,
+        "pending_items": pending_items,
         "total_cycles": total_cycles,
         "total_carbon_kg": round(total_carbon, 2),
         "total_users": total_users,
@@ -715,7 +748,8 @@ def stats_trends(days: int = Query(14, ge=3, le=60)) -> dict:
             (days,),
         ).fetchall()
         by_cat = conn.execute(
-            "SELECT category, COUNT(*) AS cnt, COALESCE(SUM(carbon_saved), 0) AS carbon FROM items GROUP BY category"
+            """SELECT category, COUNT(*) AS cnt, COALESCE(SUM(carbon_saved), 0) AS carbon
+               FROM items WHERE review_status = 'approved' GROUP BY category"""
         ).fetchall()
         by_status = conn.execute("SELECT status, COUNT(*) AS cnt FROM items GROUP BY status").fetchall()
     return {"trend": [dict(r) for r in reversed(rows)], "by_category": rows_to_dicts(by_cat), "by_status": rows_to_dicts(by_status)}
@@ -770,6 +804,30 @@ ORDER_SQL = """
 """
 
 
+def attach_counterparty(conn, order: dict, viewer_id: Optional[int]) -> dict:
+    """为订单补充「交易对方」的联系方式，仅当查看者是订单参与方时返回。
+
+    线下履约需要买卖双方取得联系（约定自提时间地点），因此把对方的
+    姓名与联系方式开放给对侧参与方；非参与方（含管理员）一律不返回，
+    避免联系方式被无关人员读取。
+    """
+    order["counterparty_name"] = None
+    order["counterparty_contact"] = None
+    if viewer_id is None:
+        return order
+    if viewer_id == order["buyer_id"]:
+        other_id = order["seller_id"]
+    elif viewer_id == order["seller_id"]:
+        other_id = order["buyer_id"]
+    else:
+        return order
+    row = conn.execute("SELECT name, contact FROM users WHERE id = ?", (other_id,)).fetchone()
+    if row:
+        order["counterparty_name"] = row["name"]
+        order["counterparty_contact"] = row["contact"]
+    return order
+
+
 def _transition(conn, order_id: int, from_status: str, to_status: str):
     order = conn.execute("SELECT * FROM orders WHERE id = ?", (order_id,)).fetchone()
     if not order:
@@ -799,28 +857,40 @@ def list_orders(user: dict = Depends(current_user), role: Optional[str] = Query(
     sql += " ORDER BY o.id DESC"
     with database.db_session() as conn:
         rows = conn.execute(sql, params).fetchall()
-    return rows_to_dicts(rows)
+        data = [attach_counterparty(conn, dict(r), user["id"]) for r in rows]
+    return data
 
 
 @app.post("/api/orders", response_model=OrderOut, status_code=201)
 def create_order(payload: OrderCreate, user: dict = Depends(current_user)) -> dict:
-    """买家发起预约（买家即当前登录用户）。"""
+    """买家发起预约（买家即当前登录用户）。
+
+    并发安全：先以条件更新抢占物品（``WHERE status='available'``）并检查影响行数，
+    抢占成功后再写入订单。这样即使多个买家同时预约，也只有一个能拿到物品，
+    避免 check-then-act 竞态导致的重复订单（超卖）。
+    """
     with database.db_session() as conn:
         item = conn.execute("SELECT * FROM items WHERE id = ?", (payload.item_id,)).fetchone()
         if not item:
             raise HTTPException(status_code=404, detail="物品不存在")
         if item["owner_id"] == user["id"]:
             raise HTTPException(status_code=400, detail="不能预约自己发布的物品")
-        if item["status"] != "available":
+        if item["review_status"] != "approved":
+            raise HTTPException(status_code=400, detail="该物品尚未通过审核，暂不可预约")
+        # 原子抢占：仅当仍为 available 时置为 reserved
+        claimed = conn.execute(
+            "UPDATE items SET status = 'reserved' WHERE id = ? AND status = 'available'",
+            (payload.item_id,),
+        )
+        if claimed.rowcount == 0:
             raise HTTPException(status_code=400, detail="该物品当前不可预约")
         code = f"GC-{secrets.token_hex(3).upper()}"
         cur = conn.execute(
             "INSERT INTO orders (item_id, buyer_id, seller_id, status, pickup_code) VALUES (?, ?, ?, 'reserved', ?)",
             (payload.item_id, user["id"], item["owner_id"], code),
         )
-        conn.execute("UPDATE items SET status = 'reserved' WHERE id = ?", (payload.item_id,))
         row = conn.execute(ORDER_SQL + " WHERE o.id = ?", (cur.lastrowid,)).fetchone()
-    return dict(row)
+        return attach_counterparty(conn, dict(row), user["id"])
 
 
 @app.post("/api/orders/{order_id}/confirm", response_model=OrderOut)
@@ -833,7 +903,7 @@ def confirm_order(order_id: int, payload: OrderAction, user: dict = Depends(curr
             raise HTTPException(status_code=403, detail="只有卖家可以确认预约")
         _transition(conn, order_id, "reserved", "confirmed")
         row = conn.execute(ORDER_SQL + " WHERE o.id = ?", (order_id,)).fetchone()
-    return dict(row)
+        return attach_counterparty(conn, dict(row), user["id"])
 
 
 @app.post("/api/orders/{order_id}/complete", response_model=OrderOut)
@@ -856,7 +926,7 @@ def complete_order(order_id: int, payload: OrderAction, user: dict = Depends(cur
         )
         database.add_points(conn, order["seller_id"], REWARD_CYCLE, f"完成流转《{item['title']}》获得碳积分")
         row = conn.execute(ORDER_SQL + " WHERE o.id = ?", (order_id,)).fetchone()
-    return dict(row)
+        return attach_counterparty(conn, dict(row), user["id"])
 
 
 @app.post("/api/orders/{order_id}/cancel", response_model=OrderOut)
@@ -870,12 +940,17 @@ def cancel_order(order_id: int, payload: OrderAction, user: dict = Depends(curre
         _transition(conn, order_id, order["status"], "cancelled")
         conn.execute("UPDATE items SET status = 'available' WHERE id = ?", (order["item_id"],))
         row = conn.execute(ORDER_SQL + " WHERE o.id = ?", (order_id,)).fetchone()
-    return dict(row)
+        return attach_counterparty(conn, dict(row), user["id"])
 
 
 # =======================================================================
 # 举报
 # =======================================================================
+REPORT_SQL = """
+    SELECT r.*, i.title AS item_title, u.name AS reporter_name
+    FROM reports r JOIN items i ON i.id = r.item_id JOIN users u ON u.id = r.reporter_id
+"""
+
 @app.post("/api/reports", status_code=201)
 def create_report(payload: ReportCreate, user: dict = Depends(current_user)) -> dict:
     with database.db_session() as conn:
@@ -896,6 +971,16 @@ def create_report(payload: ReportCreate, user: dict = Depends(current_user)) -> 
         )
         row = conn.execute("SELECT * FROM reports WHERE id = ?", (cur.lastrowid,)).fetchone()
     return dict(row)
+
+
+@app.get("/api/reports/mine", response_model=List[ReportOut])
+def my_reports(user: dict = Depends(current_user)) -> List[dict]:
+    """我提交过的举报及其处理进度（仅本人可见）。"""
+    with database.db_session() as conn:
+        rows = conn.execute(
+            REPORT_SQL + " WHERE r.reporter_id = ? ORDER BY r.id DESC", (user["id"],)
+        ).fetchall()
+    return rows_to_dicts(rows)
 
 
 # =======================================================================
@@ -1012,11 +1097,6 @@ def admin_restore(item_id: int, admin: dict = Depends(require_admin)) -> dict:
     return dict(row)
 
 
-REPORT_SQL = """
-    SELECT r.*, i.title AS item_title, u.name AS reporter_name
-    FROM reports r JOIN items i ON i.id = r.item_id JOIN users u ON u.id = r.reporter_id
-"""
-
 
 @app.get("/api/admin/reports", response_model=List[ReportOut])
 def admin_reports(admin: dict = Depends(require_admin), status: Optional[str] = None) -> List[dict]:
@@ -1045,14 +1125,21 @@ def admin_resolve_report(report_id: int, admin: dict = Depends(require_admin)) -
 
 
 @app.get("/api/admin/orders", response_model=List[OrderOut])
-def admin_orders(admin: dict = Depends(require_admin), status: Optional[str] = None) -> List[dict]:
+def admin_orders(
+    admin: dict = Depends(require_admin),
+    status: Optional[str] = None,
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+) -> List[dict]:
+    """全平台订单（分页，按最新在前）。"""
     with database.db_session() as conn:
         sql = ORDER_SQL
         params: list = []
         if status:
             sql += " WHERE o.status = ?"
             params.append(status)
-        sql += " ORDER BY o.id DESC LIMIT 200"
+        sql += " ORDER BY o.id DESC LIMIT ? OFFSET ?"
+        params += [limit, offset]
         rows = conn.execute(sql, params).fetchall()
     return rows_to_dicts(rows)
 
@@ -1074,6 +1161,25 @@ def admin_users(admin: dict = Depends(require_admin)) -> List[dict]:
     for d in data:
         d["carbon_kg"] = round(d["carbon_kg"], 2)
     return data
+
+
+@app.post("/api/admin/users/{user_id}/password")
+def admin_reset_password(user_id: int, payload: AdminPasswordReset, admin: dict = Depends(require_admin)) -> dict:
+    """管理员为用户重置密码（用于用户忘记密码的场景）。
+
+    重置后注销该用户全部会话、清除其登录失败锁定，用户需用新密码重新登录。
+    """
+    with database.db_session() as conn:
+        target = conn.execute("SELECT id, name, student_no FROM users WHERE id = ?", (user_id,)).fetchone()
+        if not target:
+            raise HTTPException(status_code=404, detail="用户不存在")
+        conn.execute("UPDATE users SET password_hash = ? WHERE id = ?", (hash_password(payload.new_password), user_id))
+        conn.execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))
+        # 该用户可能因连续失败被锁定，一并清除，避免重置后仍无法登录
+        if target["student_no"]:
+            auth.clear_login_failures(conn, target["student_no"])
+        auth.clear_login_failures(conn, target["name"])
+    return {"ok": True, "message": f"已重置「{target['name']}」的密码，请通知其使用新密码登录"}
 
 
 @app.post("/api/admin/products", response_model=ProductOut, status_code=201)

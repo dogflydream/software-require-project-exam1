@@ -210,3 +210,12 @@ INSERT INTO categories (name, icon, carbon_factor, sort_order, protected)
 SELECT '生活品', 'sofa', 3.5, 30, 0 WHERE NOT EXISTS (SELECT 1 FROM categories WHERE name='生活品');
 INSERT INTO categories (name, icon, carbon_factor, sort_order, protected)
 SELECT '其它', 'box', 2.0, 99, 1 WHERE NOT EXISTS (SELECT 1 FROM categories WHERE name='其它');
+
+-- 绿循校园 数据库结构（增量 12：登录失败限流）
+-- 记录登录失败次数，用于防暴力破解；成功登录或锁定到期后清零。
+CREATE TABLE IF NOT EXISTS login_attempts (
+    identifier TEXT PRIMARY KEY,                   -- 登录名（学号/姓名）
+    fail_count INTEGER NOT NULL DEFAULT 0,
+    locked_until TEXT,                             -- 锁定截止时间，为空表示未锁定
+    last_fail_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+);

@@ -21,6 +21,7 @@ const pointLogs = ref([])
 const orders = ref([])
 const myItems = ref([])
 const favorites = ref([])
+const myReports = ref([])
 const loading = ref(true)
 const editItem = ref(null)
 
@@ -30,6 +31,7 @@ const tabs = computed(() => [
   { key: 'sell', label: '我卖出的', icon: 'handshake', count: ordersFor('sell').length },
   { key: 'items', label: '我发布的', icon: 'box', count: myItems.value.length },
   { key: 'fav', label: '我的收藏', icon: 'heart', count: favorites.value.length },
+  { key: 'reports', label: '我的举报', icon: 'flag', count: myReports.value.length },
 ])
 const stats = computed(() => {
   const s = summary.value.stats || {}
@@ -90,12 +92,13 @@ async function askOffshelf(it) {
 async function loadAll() {
   loading.value = true
   try {
-    const [s, logs, ords, mine, favs] = await Promise.all([
+    const [s, logs, ords, mine, favs, reps] = await Promise.all([
       api.get('/api/me/summary'), api.get('/api/point-logs'),
       api.get('/api/orders'), api.get('/api/items/mine'), api.get('/api/favorites'),
+      api.get('/api/reports/mine'),
     ])
     summary.value = s; pointLogs.value = logs; orders.value = ords
-    myItems.value = mine; favorites.value = favs
+    myItems.value = mine; favorites.value = favs; myReports.value = reps
   } catch (e) {
     if (e.status === 401) router.push({ name: 'login' })
     else ui.toast(e.message, 'error')
@@ -198,6 +201,17 @@ onMounted(loadAll)
                     </span>
                     <span>{{ o.updated_at }}</span>
                   </p>
+                  <!-- 线下履约需要联系对方：仅在订单处于进行中时展示对方联系方式 -->
+                  <p v-if="['reserved', 'confirmed'].includes(o.status) && o.counterparty_contact"
+                     class="mt-1 text-[11px] inline-flex items-center gap-1 text-brand-700 dark:text-brand-400">
+                    <Icon name="phone" :size="12" />
+                    <span>联系{{ tab === 'buy' ? '卖家' : '买家' }}{{ o.counterparty_name }}：</span>
+                    <code class="font-mono bg-brand-50 dark:bg-brand-500/10 px-1.5 rounded">{{ o.counterparty_contact }}</code>
+                  </p>
+                  <p v-else-if="['reserved', 'confirmed'].includes(o.status)"
+                     class="mt-1 text-[11px] text-subtle">
+                    对方尚未填写联系方式，可在个人资料中补充后告知
+                  </p>
                 </div>
                 <span class="px-2.5 py-1 rounded-lg text-[11px] font-semibold shrink-0" :class="statusChip(o.status)">{{ statusLabel(o.status) }}</span>
               </div>
@@ -254,6 +268,28 @@ onMounted(loadAll)
               <span class="px-2.5 py-1 rounded-lg text-[11px] font-semibold shrink-0" :class="itemStatusChip(f.status)">{{ itemStatusLabel(f.status) }}</span>
               <button type="button" @click="removeFavorite(f)"
                       class="h-8 px-2.5 rounded-lg border border-line text-xs text-muted hover:text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-500/10 transition-colors shrink-0">取消收藏</button>
+            </li>
+          </ul>
+        </div>
+
+        <!-- 我的举报 -->
+        <div v-show="tab === 'reports'" class="p-5">
+          <p v-if="myReports.length === 0" class="py-14 text-center text-sm text-muted">
+            还没有提交过举报
+            <span class="block mt-1 text-xs text-subtle">在物品详情页可举报描述失实或违规的物品</span>
+          </p>
+          <ul v-else class="space-y-3">
+            <li v-for="r in myReports" :key="r.id" class="p-4 rounded-xl border"
+                :class="r.status === 'open' ? 'border-amber-200 dark:border-amber-500/30 bg-amber-50/40 dark:bg-amber-400/5' : 'border-line bg-canvas/50'">
+              <div class="flex items-start justify-between gap-2">
+                <RouterLink :to="`/items/${r.item_id}`" class="text-sm font-semibold text-ink hover:text-brand-700 dark:hover:text-brand-400">{{ r.item_title }}</RouterLink>
+                <span class="px-2 py-0.5 rounded-lg text-[11px] font-semibold shrink-0"
+                      :class="r.status === 'open' ? 'bg-amber-100 dark:bg-amber-400/15 text-amber-700 dark:text-amber-300' : 'bg-brand-100 dark:bg-brand-400/15 text-brand-700 dark:text-brand-300'">
+                  {{ r.status === 'open' ? '处理中' : '已处理' }}
+                </span>
+              </div>
+              <p class="mt-1.5 text-[13px] text-muted">“{{ r.reason }}”</p>
+              <p class="mt-1 text-[11px] text-subtle">提交于 {{ r.created_at }}</p>
             </li>
           </ul>
         </div>
