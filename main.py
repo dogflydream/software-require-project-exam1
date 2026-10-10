@@ -1,7 +1,7 @@
 """绿循校园——校园闲置教材与物品循环流转系统。
 
 分层：
-- 常量与业务规则（REWARD_*、CARBON_FACTOR、ORDER_TRANSITIONS）
+- 常量与业务规则（REWARD_*、分类减碳系数、ORDER_TRANSITIONS）
 - 认证与授权层：auth.py（会话 Cookie 派生身份）
 - API 控制层：FastAPI 路由
 - 业务逻辑层：_transition / estimate_carbon 等纯业务函数
@@ -31,10 +31,11 @@ import auth
 import database
 from auth import SESSION_COOKIE, SESSION_DAYS, current_user, hash_password, require_admin, verify_password
 from models import (
-    AdminItemOut, FavoriteOut, Health, ItemCreate, ItemDetailOut, ItemOut, ItemUpdate,
-    LoginRequest, OrderAction, OrderCreate, OrderOut, PasswordChange, PointLogOut,
-    ProductCreate, ProductOut, ProductUpdate, ProfileUpdate, RedeemOut, RedeemRequest,
-    RegisterRequest, ReportCreate, ReportOut, UserOut, UserPublic,
+    AdminItemOut, CategoryCreate, CategoryOut, CategoryUpdate, FavoriteOut, Health,
+    ItemCreate, ItemDetailOut, ItemOut, ItemUpdate, LoginRequest, OrderAction, OrderCreate,
+    OrderOut, PasswordChange, PointLogOut, ProductCreate, ProductOut, ProductUpdate,
+    ProfileUpdate, RedeemOut, RedeemRequest, RegisterRequest, ReportCreate, ReportOut,
+    ReviewAction, UserOut, UserPublic,
 )
 
 APP_NAME = "绿循校园"
@@ -60,8 +61,33 @@ STATUS_LABEL = {
     "cancelled": "已取消",
 }
 
-CARBON_FACTOR = {"教材": 2.5, "考研": 2.0, "生活品": 3.5}
+CARBON_FACTOR_FALLBACK = 2.0
 TREE_ABSORB_PER_YEAR = 18.0
+
+# 分类缓存：分类数据变动极少，启动时载入并在管理员增删改后失效
+_category_factors: dict = {}
+
+
+def refresh_category_cache(conn=None) -> None:
+    """重新载入分类减碳系数缓存。"""
+    global _category_factors
+    if conn is not None:
+        rows = conn.execute("SELECT name, carbon_factor FROM categories").fetchall()
+    else:
+        with database.db_session() as c:
+            rows = c.execute("SELECT name, carbon_factor FROM categories").fetchall()
+    _category_factors = {r["name"]: r["carbon_factor"] for r in rows}
+
+
+def category_names(conn) -> set:
+    """当前启用中的分类名称集合。"""
+    return {r["name"] for r in conn.execute("SELECT name FROM categories").fetchall()}
+
+
+def require_category(conn, name: str) -> None:
+    """校验分类存在（管理员可管理分类，物品只能引用已启用分类）。"""
+    if name not in category_names(conn):
+        raise HTTPException(status_code=422, detail=f"分类「{name}」不存在，请从可用分类中选择")
 
 # 图片上传约束：客户端先等比压缩再以 data URL 提交，服务端解码落盘
 MAX_IMAGE_BYTES = 2 * 1024 * 1024  # 2MB
@@ -82,6 +108,7 @@ async def lifespan(app: FastAPI):
     database.init_db()
     _seed_demo_passwords()
     UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    refresh_category_cache()
     logger.info("%s v%s 启动完成，数据库就绪", APP_NAME, APP_VERSION)
     yield
 
@@ -114,7 +141,8 @@ async def unhandled_handler(request: Request, exc: Exception) -> JSONResponse:
 
 
 def estimate_carbon(category: str) -> float:
-    return CARBON_FACTOR.get(category, 2.0)
+    """单次流转减碳量估算，系数取自分类配置（未知分类用兜底值）。"""
+    return _category_factors.get(category, CARBON_FACTOR_FALLBACK)
 
 
 def rows_to_dicts(rows) -> List[dict]:
@@ -319,6 +347,97 @@ def my_summary(user: dict = Depends(current_user)) -> dict:
 
 
 # =======================================================================
+# 物品分类（公开读取；管理员增删改）
+# =======================================================================
+CATEGORY_SQL = """
+    SELECT c.*, (SELECT COUNT(*) FROM items i WHERE i.category = c.name) AS item_count
+    FROM categories c
+"""
+
+
+@app.get("/api/categories", response_model=List[CategoryOut])
+def list_categories() -> List[dict]:
+    """可用分类列表（发布/筛选/展示共用）。"""
+    with database.db_session() as conn:
+        rows = conn.execute(CATEGORY_SQL + " ORDER BY c.sort_order, c.id").fetchall()
+    data = rows_to_dicts(rows)
+    for d in data:
+        d["protected"] = bool(d["protected"])
+    return data
+
+
+@app.post("/api/admin/categories", response_model=CategoryOut, status_code=201)
+def admin_create_category(payload: CategoryCreate, admin: dict = Depends(require_admin)) -> dict:
+    name = payload.name.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="分类名称不能为空")
+    with database.db_session() as conn:
+        if conn.execute("SELECT 1 FROM categories WHERE name = ?", (name,)).fetchone():
+            raise HTTPException(status_code=400, detail=f"分类「{name}」已存在")
+        cur = conn.execute(
+            "INSERT INTO categories (name, icon, carbon_factor, sort_order, protected) VALUES (?, ?, ?, ?, 0)",
+            (name, payload.icon, payload.carbon_factor, payload.sort_order),
+        )
+        row = conn.execute(CATEGORY_SQL + " WHERE c.id = ?", (cur.lastrowid,)).fetchone()
+        refresh_category_cache(conn)
+    data = dict(row)
+    data["protected"] = bool(data["protected"])
+    return data
+
+
+@app.patch("/api/admin/categories/{category_id}", response_model=CategoryOut)
+def admin_update_category(category_id: int, payload: CategoryUpdate, admin: dict = Depends(require_admin)) -> dict:
+    """重命名分类时同步更新引用该分类的物品，保持数据一致。"""
+    with database.db_session() as conn:
+        cat = conn.execute("SELECT * FROM categories WHERE id = ?", (category_id,)).fetchone()
+        if not cat:
+            raise HTTPException(status_code=404, detail="分类不存在")
+        fields = payload.model_dump(exclude_none=True)
+        if not fields:
+            raise HTTPException(status_code=400, detail="没有需要修改的内容")
+        new_name = fields.get("name")
+        if new_name:
+            new_name = new_name.strip()
+            if not new_name:
+                raise HTTPException(status_code=400, detail="分类名称不能为空")
+            dup = conn.execute(
+                "SELECT 1 FROM categories WHERE name = ? AND id != ?", (new_name, category_id)
+            ).fetchone()
+            if dup:
+                raise HTTPException(status_code=400, detail=f"分类「{new_name}」已存在")
+            fields["name"] = new_name
+            if new_name != cat["name"]:
+                conn.execute("UPDATE items SET category = ? WHERE category = ?", (new_name, cat["name"]))
+        sets = ", ".join(f"{k} = ?" for k in fields)
+        conn.execute(f"UPDATE categories SET {sets} WHERE id = ?", (*fields.values(), category_id))
+        row = conn.execute(CATEGORY_SQL + " WHERE c.id = ?", (category_id,)).fetchone()
+        refresh_category_cache(conn)
+    data = dict(row)
+    data["protected"] = bool(data["protected"])
+    return data
+
+
+@app.delete("/api/admin/categories/{category_id}")
+def admin_delete_category(category_id: int, admin: dict = Depends(require_admin)) -> dict:
+    """删除分类：兜底分类与仍被物品引用的分类不可删除。"""
+    with database.db_session() as conn:
+        cat = conn.execute("SELECT * FROM categories WHERE id = ?", (category_id,)).fetchone()
+        if not cat:
+            raise HTTPException(status_code=404, detail="分类不存在")
+        if cat["protected"]:
+            raise HTTPException(status_code=400, detail=f"「{cat['name']}」为系统兜底分类，不可删除")
+        used = conn.execute("SELECT COUNT(*) FROM items WHERE category = ?", (cat["name"],)).fetchone()[0]
+        if used:
+            raise HTTPException(
+                status_code=400,
+                detail=f"仍有 {used} 件物品属于「{cat['name']}」，请先将其归入其它分类后再删除",
+            )
+        conn.execute("DELETE FROM categories WHERE id = ?", (category_id,))
+        refresh_category_cache(conn)
+    return {"ok": True}
+
+
+# =======================================================================
 # 物品（市集）
 # =======================================================================
 ITEM_SQL = """
@@ -336,13 +455,14 @@ SORT_SQL = {
 
 @app.get("/api/items", response_model=List[ItemOut])
 def list_items(
-    category: Optional[str] = Query(None, pattern="^(教材|考研|生活品)$"),
+    category: Optional[str] = Query(None, max_length=10),
     keyword: Optional[str] = Query(None, max_length=50),
     sort: str = Query("latest", pattern="^(latest|price_asc|price_desc|cycle)$"),
     limit: int = Query(60, ge=1, le=200),
     offset: int = Query(0, ge=0),
 ) -> List[dict]:
-    sql = ITEM_SQL + " WHERE i.status IN ('available', 'reserved')"
+    # 仅展示已通过审核的在售/已预约物品
+    sql = ITEM_SQL + " WHERE i.status IN ('available', 'reserved') AND i.review_status = 'approved'"
     params: list = []
     if category:
         sql += " AND i.category = ?"
@@ -359,7 +479,7 @@ def list_items(
 
 @app.get("/api/items/mine", response_model=List[ItemOut])
 def my_items(user: dict = Depends(current_user)) -> List[dict]:
-    """我发布的全部物品（身份取自会话）。"""
+    """我发布的全部物品（含待审核/已驳回，身份取自会话）。"""
     with database.db_session() as conn:
         rows = conn.execute(ITEM_SQL + " WHERE i.owner_id = ? ORDER BY i.id DESC", (user["id"],)).fetchall()
     return rows_to_dicts(rows)
@@ -367,20 +487,25 @@ def my_items(user: dict = Depends(current_user)) -> List[dict]:
 
 @app.get("/api/items/{item_id}", response_model=ItemDetailOut)
 def get_item(item_id: int, request: Request) -> dict:
-    """物品详情（收藏状态按会话判定，未登录则视为未收藏）。"""
+    """物品详情。
+
+    待审核/已驳回的物品仅物主与管理员可见，避免未审核内容对外暴露。
+    """
     token = request.cookies.get(SESSION_COOKIE)
-    viewer_id = None
+    viewer = None
     with database.db_session() as conn:
         if token:
-            u = auth.user_for_token(conn, token)
-            viewer_id = u["id"] if u else None
+            viewer = auth.user_for_token(conn, token)
         row = conn.execute(ITEM_SQL + " WHERE i.id = ?", (item_id,)).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="物品不存在")
+        is_privileged = bool(viewer and (viewer["id"] == row["owner_id"] or viewer["role"] == "admin"))
+        if row["review_status"] != "approved" and not is_privileged:
+            raise HTTPException(status_code=404, detail="物品不存在")
         data = dict(row)
         data["favorite_count"] = conn.execute("SELECT COUNT(*) FROM favorites WHERE item_id = ?", (item_id,)).fetchone()[0]
-        data["favorited"] = bool(viewer_id and conn.execute(
-            "SELECT 1 FROM favorites WHERE user_id = ? AND item_id = ?", (viewer_id, item_id)
+        data["favorited"] = bool(viewer and conn.execute(
+            "SELECT 1 FROM favorites WHERE user_id = ? AND item_id = ?", (viewer["id"], item_id)
         ).fetchone())
     return data
 
@@ -390,8 +515,10 @@ def create_item(payload: ItemCreate, user: dict = Depends(current_user)) -> dict
     """发布闲置物品（归属为当前登录用户，客户端无法指定 owner）。"""
     image = save_data_url(payload.image) if payload.image else None
     with database.db_session() as conn:
+        require_category(conn, payload.category)
         cur = conn.execute(
-            "INSERT INTO items (owner_id, title, category, description, price, image) VALUES (?, ?, ?, ?, ?, ?)",
+            """INSERT INTO items (owner_id, title, category, description, price, image, review_status, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, 'approved', datetime('now','localtime'))""",
             (user["id"], payload.title, payload.category, payload.description, payload.price, image),
         )
         database.add_points(conn, user["id"], REWARD_PUBLISH, f"发布闲置《{payload.title}》获得碳积分")
@@ -401,7 +528,11 @@ def create_item(payload: ItemCreate, user: dict = Depends(current_user)) -> dict
 
 @app.patch("/api/items/{item_id}", response_model=ItemOut)
 def update_item(item_id: int, payload: ItemUpdate, user: dict = Depends(current_user)) -> dict:
-    """物主修改自己物品（资源级授权：非物主 403）。"""
+    """物主修改自己物品（资源级授权：非物主 403）。
+
+    修改内容后物品需重新提交审核：状态置为 pending，市集暂不展示，
+    由管理员复核通过后恢复在售。
+    """
     with database.db_session() as conn:
         item = conn.execute("SELECT * FROM items WHERE id = ?", (item_id,)).fetchone()
         if not item:
@@ -413,12 +544,20 @@ def update_item(item_id: int, payload: ItemUpdate, user: dict = Depends(current_
         fields = payload.model_dump(exclude_none=True)
         if not fields:
             raise HTTPException(status_code=400, detail="没有需要修改的内容")
+        if "category" in fields:
+            require_category(conn, fields["category"])
         if "price" in fields and item["status"] == "reserved":
             raise HTTPException(status_code=400, detail="物品已被预约，不能修改价格")
         if "image" in fields:
             fields["image"] = save_data_url(fields["image"])
+        # 重新提交审核：清空上次驳回理由，并记录更新时间
+        fields["review_status"] = "pending"
+        fields["review_note"] = None
         sets = ", ".join(f"{k} = ?" for k in fields)
-        conn.execute(f"UPDATE items SET {sets} WHERE id = ?", (*fields.values(), item_id))
+        conn.execute(
+            f"UPDATE items SET {sets}, updated_at = datetime('now','localtime') WHERE id = ?",
+            (*fields.values(), item_id),
+        )
         row = conn.execute(ITEM_SQL + " WHERE i.id = ?", (item_id,)).fetchone()
     return dict(row)
 
@@ -566,9 +705,10 @@ def stats_trends(days: int = Query(14, ge=3, le=60)) -> dict:
         rows = conn.execute(
             """
             SELECT date(o.updated_at) AS d, COUNT(*) AS cycles,
-                   COALESCE(SUM(CASE i.category
-                       WHEN '教材' THEN 2.5 WHEN '考研' THEN 2.0 WHEN '生活品' THEN 3.5 ELSE 2.0 END), 0) AS carbon
-            FROM orders o JOIN items i ON i.id = o.item_id
+                   COALESCE(SUM(COALESCE(c.carbon_factor, 2.0)), 0) AS carbon
+            FROM orders o
+            JOIN items i ON i.id = o.item_id
+            LEFT JOIN categories c ON c.name = i.category
             WHERE o.status = 'completed'
             GROUP BY date(o.updated_at) ORDER BY d DESC LIMIT ?
             """,
@@ -770,6 +910,7 @@ def admin_summary(admin: dict = Depends(require_admin)) -> dict:
         }
         open_reports = conn.execute("SELECT COUNT(*) FROM reports WHERE status = 'open'").fetchone()[0]
         flagged_items = conn.execute("SELECT COUNT(DISTINCT item_id) FROM reports WHERE status = 'open'").fetchone()[0]
+        pending_review = conn.execute("SELECT COUNT(*) FROM items WHERE review_status = 'pending'").fetchone()[0]
     return {
         **stats_summary(),
         "orders_total": sum(orders_by_status.values()),
@@ -777,11 +918,13 @@ def admin_summary(admin: dict = Depends(require_admin)) -> dict:
         "orders_active": sum(orders_by_status.get(s, 0) for s in ("reserved", "confirmed")),
         "open_reports": open_reports,
         "flagged_items": flagged_items,
+        "pending_review": pending_review,
     }
 
 
 ADMIN_ITEM_SQL = """
     SELECT i.id, i.title, i.category, i.price, i.status, i.image, i.cycle_count, i.carbon_saved,
+           i.review_status, i.review_note, i.owner_id, i.updated_at,
            u.name AS owner_name,
            (SELECT COUNT(*) FROM reports r WHERE r.item_id = i.id AND r.status = 'open') AS report_count
     FROM items i JOIN users u ON u.id = i.owner_id
@@ -789,16 +932,51 @@ ADMIN_ITEM_SQL = """
 
 
 @app.get("/api/admin/items", response_model=List[AdminItemOut])
-def admin_items(admin: dict = Depends(require_admin), status: Optional[str] = None) -> List[dict]:
+def admin_items(
+    admin: dict = Depends(require_admin),
+    status: Optional[str] = None,
+    review_status: Optional[str] = Query(None, pattern="^(approved|pending|rejected)$"),
+) -> List[dict]:
+    """管理员物品清单：待审核优先，其次按未处理举报数与更新时间排序。"""
     with database.db_session() as conn:
         sql = ADMIN_ITEM_SQL
         params: list = []
+        where: list = []
         if status:
-            sql += " WHERE i.status = ?"
+            where.append("i.status = ?")
             params.append(status)
-        sql += " ORDER BY report_count DESC, i.id DESC"
+        if review_status:
+            where.append("i.review_status = ?")
+            params.append(review_status)
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        sql += """
+            ORDER BY CASE i.review_status WHEN 'pending' THEN 0 WHEN 'rejected' THEN 1 ELSE 2 END,
+                     report_count DESC, i.id DESC
+        """
         rows = conn.execute(sql, params).fetchall()
     return rows_to_dicts(rows)
+
+
+@app.post("/api/admin/items/{item_id}/review", response_model=AdminItemOut)
+def admin_review_item(item_id: int, payload: ReviewAction, admin: dict = Depends(require_admin)) -> dict:
+    """审核物品：通过后进入市集在售；驳回需给出理由，物品不再对外展示。"""
+    with database.db_session() as conn:
+        item = conn.execute("SELECT * FROM items WHERE id = ?", (item_id,)).fetchone()
+        if not item:
+            raise HTTPException(status_code=404, detail="物品不存在")
+        if item["review_status"] == "approved" and payload.approve:
+            raise HTTPException(status_code=400, detail="该物品已是审核通过状态")
+        if not payload.approve and not (payload.note or "").strip():
+            raise HTTPException(status_code=400, detail="驳回时必须填写理由")
+        new_status = "approved" if payload.approve else "rejected"
+        conn.execute(
+            """UPDATE items SET review_status = ?, review_note = ?,
+               updated_at = datetime('now','localtime') WHERE id = ?""",
+            (new_status, (payload.note or None) if not payload.approve else None, item_id),
+        )
+        row = conn.execute(ADMIN_ITEM_SQL + " WHERE i.id = ?", (item_id,)).fetchone()
+    return dict(row)
 
 
 @app.post("/api/admin/items/{item_id}/offshelf", response_model=AdminItemOut)
@@ -809,20 +987,27 @@ def admin_offshelf(item_id: int, admin: dict = Depends(require_admin)) -> dict:
             raise HTTPException(status_code=404, detail="物品不存在")
         if item["status"] == "offshelf":
             raise HTTPException(status_code=400, detail="物品已是下架状态")
-        conn.execute("UPDATE items SET status = 'offshelf' WHERE id = ?", (item_id,))
+        conn.execute(
+            "UPDATE items SET status = 'offshelf', updated_at = datetime('now','localtime') WHERE id = ?",
+            (item_id,),
+        )
         row = conn.execute(ADMIN_ITEM_SQL + " WHERE i.id = ?", (item_id,)).fetchone()
     return dict(row)
 
 
 @app.post("/api/admin/items/{item_id}/restore", response_model=AdminItemOut)
 def admin_restore(item_id: int, admin: dict = Depends(require_admin)) -> dict:
+    """恢复上架：未通过审核的物品恢复后仍不可见，需先审核通过。"""
     with database.db_session() as conn:
         item = conn.execute("SELECT * FROM items WHERE id = ?", (item_id,)).fetchone()
         if not item:
             raise HTTPException(status_code=404, detail="物品不存在")
         if item["status"] != "offshelf":
             raise HTTPException(status_code=400, detail="仅下架物品可恢复上架")
-        conn.execute("UPDATE items SET status = 'available' WHERE id = ?", (item_id,))
+        conn.execute(
+            "UPDATE items SET status = 'available', updated_at = datetime('now','localtime') WHERE id = ?",
+            (item_id,),
+        )
         row = conn.execute(ADMIN_ITEM_SQL + " WHERE i.id = ?", (item_id,)).fetchone()
     return dict(row)
 

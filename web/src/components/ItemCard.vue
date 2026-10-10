@@ -4,7 +4,7 @@ import { RouterLink } from 'vue-router'
 import Icon from './Icon.vue'
 import ItemImage from './ItemImage.vue'
 import Avatar from './Avatar.vue'
-import { catChip } from '@/lib/format'
+import { catChip, reviewChip, reviewLabel } from '@/lib/format'
 
 const props = defineProps({
   item: { type: Object, required: true },
@@ -25,7 +25,9 @@ const canReserve = computed(() => props.me && !isOwner.value && props.item.statu
         <ItemImage :item="item" />
       </RouterLink>
       <div class="absolute top-5 right-5 flex items-center gap-1.5">
-        <span v-if="item.status === 'reserved'"
+        <span v-if="item.review_status && item.review_status !== 'approved'"
+              class="px-2 py-0.5 rounded-full text-[11px] font-semibold shadow-sm" :class="reviewChip(item.review_status)">{{ reviewLabel(item.review_status) }}</span>
+        <span v-else-if="item.status === 'reserved'"
               class="px-2 py-0.5 rounded-full bg-amber-100 dark:bg-amber-400/15 text-amber-700 dark:text-amber-300 text-[11px] font-semibold shadow-sm">已预约</span>
         <button v-if="me" type="button" @click.prevent="$emit('favorite', item)" :disabled="busy"
                 :aria-label="favorited ? '取消收藏' : '收藏'"

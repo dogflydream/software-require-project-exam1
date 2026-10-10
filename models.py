@@ -3,8 +3,33 @@ from typing import Optional
 
 from pydantic import BaseModel, Field
 
-CATEGORY_PATTERN = "^(教材|考研|生活品)$"
 ITEM_STATUSES = ("available", "reserved", "completed", "offshelf")
+REVIEW_STATUSES = ("approved", "pending", "rejected")
+
+
+# ---------- 分类 ----------
+class CategoryOut(BaseModel):
+    id: int
+    name: str
+    icon: str = "box"
+    carbon_factor: float = 2.0
+    sort_order: int = 0
+    protected: bool = False
+    item_count: int = 0
+
+
+class CategoryCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=10)
+    icon: str = Field(default="box", max_length=30)
+    carbon_factor: float = Field(default=2.0, ge=0, le=100)
+    sort_order: int = Field(default=50, ge=0, le=999)
+
+
+class CategoryUpdate(BaseModel):
+    name: Optional[str] = Field(default=None, min_length=1, max_length=10)
+    icon: Optional[str] = Field(default=None, max_length=30)
+    carbon_factor: Optional[float] = Field(default=None, ge=0, le=100)
+    sort_order: Optional[int] = Field(default=None, ge=0, le=999)
 
 
 # ---------- 认证 ----------
@@ -57,7 +82,7 @@ class ProfileUpdate(BaseModel):
 # ---------- 物品 ----------
 class ItemCreate(BaseModel):
     title: str = Field(min_length=1, max_length=100)
-    category: str = Field(pattern=CATEGORY_PATTERN)
+    category: str = Field(min_length=1, max_length=10, description="分类名称，需为已启用的分类")
     description: str = Field(default="", max_length=500)
     price: float = Field(default=0, ge=0, le=99999)
     image: Optional[str] = Field(default=None, max_length=300)
@@ -65,7 +90,7 @@ class ItemCreate(BaseModel):
 
 class ItemUpdate(BaseModel):
     title: Optional[str] = Field(default=None, min_length=1, max_length=100)
-    category: Optional[str] = Field(default=None, pattern=CATEGORY_PATTERN)
+    category: Optional[str] = Field(default=None, min_length=1, max_length=10)
     description: Optional[str] = Field(default=None, max_length=500)
     price: Optional[float] = Field(default=None, ge=0, le=99999)
     image: Optional[str] = Field(default=None, max_length=300)
@@ -82,6 +107,8 @@ class ItemOut(BaseModel):
     description: str
     price: float
     status: str
+    review_status: str = "approved"
+    review_note: Optional[str] = None
     image: Optional[str] = None
     cycle_count: int
     carbon_saved: float
@@ -199,11 +226,21 @@ class AdminItemOut(BaseModel):
     category: str
     price: float
     status: str
+    review_status: str = "approved"
+    review_note: Optional[str] = None
     image: Optional[str] = None
     cycle_count: int
     carbon_saved: float
+    owner_id: int = 0
     owner_name: str = ""
     report_count: int = 0
+    updated_at: Optional[str] = None
+
+
+class ReviewAction(BaseModel):
+    """管理员审核动作：通过 / 驳回（驳回需给出理由）。"""
+    approve: bool
+    note: Optional[str] = Field(default=None, max_length=200)
 
 
 # ---------- 统计 ----------

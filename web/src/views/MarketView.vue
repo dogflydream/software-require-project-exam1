@@ -7,10 +7,12 @@ import PublishDialog from '@/components/PublishDialog.vue'
 import { api } from '@/lib/api'
 import { useAuthStore } from '@/stores/auth'
 import { useUiStore } from '@/stores/ui'
+import { useCategoryStore } from '@/stores/category'
 
 const auth = useAuthStore()
 const ui = useUiStore()
 const router = useRouter()
+const categoryStore = useCategoryStore()
 
 const items = ref([])
 const loading = ref(false)
@@ -24,12 +26,11 @@ const favIds = ref(new Set())
 const busyId = ref(null)
 const showPublish = ref(false)
 
-const categories = [
-  { key: '', label: '全部' },
-  { key: '教材', label: '教材' },
-  { key: '考研', label: '考研' },
-  { key: '生活品', label: '生活品' },
-]
+// 分类由管理员维护：首项固定为「全部」，其余动态来自后端
+const categories = computed(() => [
+  { key: '', label: '全部', icon: 'box' },
+  ...categoryStore.list.map(c => ({ key: c.name, label: c.name, icon: c.icon })),
+])
 const categoryCount = (key) => key
   ? (counts.value[key] || 0)
   : Object.values(counts.value).reduce((a, b) => a + b, 0)
@@ -128,7 +129,7 @@ async function loadSummary() {
 }
 
 watch([category, sort], () => loadItems(true))
-onMounted(() => { loadItems(true); loadSummary() })
+onMounted(() => { categoryStore.load(); loadItems(true); loadSummary() })
 onUnmounted(() => clearTimeout(searchTimer))
 </script>
 
@@ -176,11 +177,11 @@ onUnmounted(() => clearTimeout(searchTimer))
     <!-- 筛选 -->
     <div class="mt-5 flex flex-wrap items-center gap-2">
       <div class="flex items-center gap-1 p-1 rounded-xl bg-surface border border-line" role="tablist" aria-label="分类筛选">
-        <button v-for="c in categories" :key="c.key" type="button" role="tab" :aria-selected="category === c.key"
+        <button v-for="c in categories" :key="c.key || 'all'" type="button" role="tab" :aria-selected="category === c.key"
                 @click="category = c.key"
-                class="px-3.5 py-1.5 rounded-lg text-sm font-medium transition-colors"
+                class="px-3.5 py-1.5 rounded-lg text-sm font-medium transition-colors inline-flex items-center gap-1.5"
                 :class="category === c.key ? 'bg-brand-600 text-white shadow-sm' : 'text-muted hover:text-ink hover:bg-canvas'">
-          {{ c.label }}<span class="ml-1 text-[11px] opacity-70 tnum">{{ categoryCount(c.key) }}</span>
+          <Icon :name="c.icon" :size="14" />{{ c.label }}<span class="text-[11px] opacity-70 tnum">{{ categoryCount(c.key) }}</span>
         </button>
       </div>
 

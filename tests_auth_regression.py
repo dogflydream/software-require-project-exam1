@@ -198,4 +198,77 @@ passed, failed = passed + empty_ok, failed + (not empty_ok)
 inj.call("GET", "/api/items?category=" + urllib.parse.quote("' OR '1'='1"), expect=422, label="分类注入被枚举校验拒绝")
 
 print("=" * 80)
+print("十一、分类管理（管理员维护，含兜底分类「其它」）")
+cat = Client()
+cat.call("POST", "/api/auth/login", {"login": "A000000", "password": "campus123"}, expect=200, label="管理员登录")
+stu2 = Client()
+stu2.call("POST", "/api/auth/login", {"login": "20230101", "password": "campus123"}, expect=200, label="学生登录")
+
+cats = cat.call("GET", "/api/categories", expect=200, label="分类列表")
+names = [c["name"] for c in cats]
+has_other = "其它" in names
+print(f"        {'PASS' if has_other else 'FAIL'} 分类含兜底分类「其它」（实际 {names}）")
+passed, failed = passed + has_other, failed + (not has_other)
+other = next((c for c in cats if c["name"] == "其它"), None)
+prot_ok = bool(other and other.get("protected"))
+print(f"        {'PASS' if prot_ok else 'FAIL'} 「其它」标记为受保护分类")
+passed, failed = passed + prot_ok, failed + (not prot_ok)
+
+created = cat.call("POST", "/api/admin/categories",
+                   {"name": "数码", "icon": "box", "carbon_factor": 4.0, "sort_order": 40},
+                   expect=201, label="新增分类")
+cat.call("POST", "/api/admin/categories", {"name": "数码"}, expect=400, label="重名分类被拒")
+cat.call("DELETE", f"/api/admin/categories/{other['id']}", expect=400, label="删除兜底分类被拒")
+cat.call("PATCH", f"/api/admin/categories/{created['id']}", {"name": "数码产品"}, expect=200, label="重命名分类")
+stu2.call("POST", "/api/admin/categories", {"name": "越权"}, expect=403, label="学生不能建分类")
+stu2.call("DELETE", f"/api/admin/categories/{created['id']}", expect=403, label="学生不能删分类")
+cat.call("POST", "/api/admin/categories", {"name": ""}, expect=422, label="空分类名被拒")
+
+print("=" * 80)
+print("十二、物品引用动态分类 + 编辑后重新审核")
+item = stu2.call("POST", "/api/items", {"title": "数码测试物品", "category": "数码产品", "price": 10},
+                 expect=201, label="用新分类发布")
+stu2.call("POST", "/api/items", {"title": "其它测试", "category": "其它", "price": 5},
+          expect=201, label="用「其它」发布")
+stu2.call("POST", "/api/items", {"title": "非法分类", "category": "不存在的分类", "price": 5},
+          expect=422, label="不存在的分类被拒")
+
+iid = item["id"]
+stu2.call("PATCH", f"/api/items/{iid}", {"price": 99}, expect=200, label="物主编辑物品")
+after = stu2.call("GET", f"/api/items/{iid}", expect=200, label="物主可查看自己的待审物品")
+pend_ok = after.get("review_status") == "pending"
+print(f"        {'PASS' if pend_ok else 'FAIL'} 编辑后状态变为 pending（实际 {after.get('review_status')}）")
+passed, failed = passed + pend_ok, failed + (not pend_ok)
+
+market = cat.call("GET", "/api/items?keyword=数码测试", expect=200, label="市集搜索")
+hidden_ok = len(market) == 0
+print(f"        {'PASS' if hidden_ok else 'FAIL'} 待审物品不出现在市集（返回 {len(market)} 条）")
+passed, failed = passed + hidden_ok, failed + (not hidden_ok)
+anon2 = Client()
+anon2.call("GET", f"/api/items/{iid}", expect=404, label="匿名无法查看待审物品")
+
+pend_list = cat.call("GET", "/api/admin/items?review_status=pending", expect=200, label="后台待审列表")
+cat.call("POST", f"/api/admin/items/{iid}/review", {"approve": False}, expect=400, label="驳回未填理由被拒")
+rej = cat.call("POST", f"/api/admin/items/{iid}/review", {"approve": False, "note": "价格异常，请核对"},
+               expect=200, label="驳回物品")
+note_ok = rej.get("review_note") == "价格异常，请核对"
+print(f"        {'PASS' if note_ok else 'FAIL'} 驳回理由已记录")
+passed, failed = passed + note_ok, failed + (not note_ok)
+still_hidden = cat.call("GET", "/api/items?keyword=数码测试", expect=200, label="驳回后市集仍不可见")
+sh_ok = len(still_hidden) == 0
+print(f"        {'PASS' if sh_ok else 'FAIL'} 驳回后市集不可见（返回 {len(still_hidden)} 条）")
+passed, failed = passed + sh_ok, failed + (not sh_ok)
+
+cat.call("POST", f"/api/admin/items/{iid}/review", {"approve": True}, expect=200, label="审核通过")
+visible = cat.call("GET", "/api/items?keyword=数码测试", expect=200, label="通过后市集可见")
+vis_ok = len(visible) == 1
+print(f"        {'PASS' if vis_ok else 'FAIL'} 通过后市集可见（返回 {len(visible)} 条）")
+passed, failed = passed + vis_ok, failed + (not vis_ok)
+cat.call("POST", f"/api/admin/items/{iid}/review", {"approve": True}, expect=400, label="重复通过被拒")
+stu2.call("POST", f"/api/admin/items/{iid}/review", {"approve": True}, expect=403, label="学生不能审核")
+
+# 清理：删除测试分类前需先清空引用
+cat.call("DELETE", f"/api/admin/categories/{created['id']}", expect=400, label="仍有物品引用时不可删分类")
+
+print("=" * 80)
 print(f"结果：通过 {passed}，失败 {failed}")

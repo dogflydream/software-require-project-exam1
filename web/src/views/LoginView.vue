@@ -77,7 +77,7 @@ const demoAccounts = [
           </div>
         </div>
       </div>
-      <p class="relative text-[11px] text-white/60">软件工程实验项目 · 增量模型开发</p>
+      <p class="relative text-[11px] text-white/60">闲置循环 · 低碳校园</p>
     </aside>
 
     <!-- 表单侧 -->

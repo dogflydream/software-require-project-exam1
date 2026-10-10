@@ -70,7 +70,7 @@ async function submit() {
           <li class="flex items-start gap-2.5"><Icon name="check" :size="17" class="mt-0.5 shrink-0" /> 个人减碳数据实时汇入学院排行</li>
         </ul>
       </div>
-      <p class="relative text-[11px] text-white/60">软件工程实验项目 · 增量模型开发</p>
+      <p class="relative text-[11px] text-white/60">闲置循环 · 低碳校园</p>
     </aside>
 
     <section class="flex items-center justify-center p-6 bg-canvas">

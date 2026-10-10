@@ -133,7 +133,7 @@ function closeMenu(e) {
     <footer class="border-t border-line mt-auto">
       <div class="mx-auto max-w-7xl px-4 py-6 flex flex-wrap items-center justify-between gap-2 text-xs text-subtle">
         <p>绿循校园 GreenCampus · 校园闲置教材与物品循环流转系统</p>
-        <p>软件工程实验项目 · 增量模型开发 · 碳积分激励</p>
+        <p>校园闲置循环 · 碳积分激励</p>
       </div>
     </footer>
   </div>

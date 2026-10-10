@@ -1,18 +1,19 @@
 <script setup>
-import { ref, onMounted } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import Icon from '@/components/Icon.vue'
 import { api, fileToCompressedDataURL } from '@/lib/api'
 import { useUiStore } from '@/stores/ui'
-import { carbonOf } from '@/lib/format'
+import { useCategoryStore } from '@/stores/category'
 
 const props = defineProps({ item: { type: Object, default: null } })
 const emit = defineEmits(['close', 'saved'])
 const ui = useUiStore()
+const categories = useCategoryStore()
 
 const isEdit = !!props.item
 const form = ref({
   title: props.item?.title || '',
-  category: props.item?.category || '教材',
+  category: props.item?.category || categories.defaultName,
   description: props.item?.description || '',
   price: props.item?.price ?? 0,
   image: null,   // 仅当用户重新选择图片时才有值
@@ -23,9 +24,13 @@ const saving = ref(false)
 const readingImage = ref(false)
 const fileInput = ref(null)
 
-onMounted(() => {
+const carbonHint = computed(() => categories.factorOf(form.value.category))
+
+onMounted(async () => {
   // 弹层打开时锁定背景滚动
   document.body.style.overflow = 'hidden'
+  await categories.load()
+  if (!form.value.category) form.value.category = categories.defaultName
 })
 function close() {
   document.body.style.overflow = ''
@@ -142,13 +147,16 @@ async function submit() {
             <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <div>
                 <label class="block text-[13px] font-medium text-ink mb-1.5">分类</label>
-                <div class="grid grid-cols-3 gap-1.5 p-1 rounded-xl bg-canvas border border-line">
-                  <button v-for="c in ['教材', '考研', '生活品']" :key="c" type="button" @click="form.category = c"
-                          class="py-2 rounded-lg text-[12px] font-medium transition-colors"
-                          :class="form.category === c ? 'bg-brand-600 text-white' : 'text-muted hover:text-ink'">{{ c }}</button>
+                <!-- 分类由管理员维护，此处动态渲染，新增分类无需改前端 -->
+                <div class="flex flex-wrap gap-1.5 p-1 rounded-xl bg-canvas border border-line">
+                  <button v-for="c in categories.list" :key="c.id" type="button" @click="form.category = c.name"
+                          class="px-3 py-2 rounded-lg text-[12px] font-medium transition-colors inline-flex items-center gap-1.5"
+                          :class="form.category === c.name ? 'bg-brand-600 text-white' : 'text-muted hover:text-ink'">
+                    <Icon :name="c.icon || 'box'" :size="13" />{{ c.name }}
+                  </button>
                 </div>
                 <p class="mt-1.5 text-[11px] text-subtle inline-flex items-center gap-1">
-                  <Icon name="leaf" :size="12" /> 单次流转约减碳 {{ carbonOf(form.category) }} kg CO₂e
+                  <Icon name="leaf" :size="12" /> 单次流转约减碳 {{ carbonHint }} kg CO₂e
                 </p>
               </div>
               <div>
@@ -168,6 +176,10 @@ async function submit() {
 
             <div v-if="!isEdit" class="p-3 rounded-xl bg-brand-50 dark:bg-brand-500/10 flex items-center gap-2.5 text-[12px] text-brand-700 dark:text-brand-300">
               <Icon name="coin" :size="16" /> 发布成功后你将获得 <b>10 碳积分</b>
+            </div>
+            <div v-else class="p-3 rounded-xl bg-amber-50 dark:bg-amber-400/10 flex items-start gap-2.5 text-[12px] text-amber-700 dark:text-amber-300">
+              <Icon name="info" :size="16" class="mt-px shrink-0" />
+              <span>修改后物品需<b>重新提交审核</b>，审核通过前将暂时从市集下架。</span>
             </div>
             <p v-if="err.global" class="text-[13px] text-rose-500">{{ err.global }}</p>
           </div>

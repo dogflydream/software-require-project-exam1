@@ -189,3 +189,24 @@ CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
 
 -- 绿循校园 数据库结构（增量 7：用户资料与物品图片）
 -- 说明：SQLite 不支持 ADD COLUMN IF NOT EXISTS，故用 ALTER 失败忽略的方式幂等补列。
+
+-- 绿循校园 数据库结构（增量 8：可管理的物品分类）
+-- 分类由管理员维护，物品通过 category 名称引用；「其它」为受保护兜底分类，不可删除。
+CREATE TABLE IF NOT EXISTS categories (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL UNIQUE,
+    icon TEXT NOT NULL DEFAULT 'box',
+    carbon_factor REAL NOT NULL DEFAULT 2.0,   -- 该类别单次流转的减碳估算系数（kg CO₂e）
+    sort_order INTEGER NOT NULL DEFAULT 0,
+    protected INTEGER NOT NULL DEFAULT 0,      -- 1 = 系统兜底分类，禁止删除
+    created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+);
+
+INSERT INTO categories (name, icon, carbon_factor, sort_order, protected)
+SELECT '教材', 'book', 2.5, 10, 0 WHERE NOT EXISTS (SELECT 1 FROM categories);
+INSERT INTO categories (name, icon, carbon_factor, sort_order, protected)
+SELECT '考研', 'pencil', 2.0, 20, 0 WHERE NOT EXISTS (SELECT 1 FROM categories WHERE name='考研');
+INSERT INTO categories (name, icon, carbon_factor, sort_order, protected)
+SELECT '生活品', 'sofa', 3.5, 30, 0 WHERE NOT EXISTS (SELECT 1 FROM categories WHERE name='生活品');
+INSERT INTO categories (name, icon, carbon_factor, sort_order, protected)
+SELECT '其它', 'box', 2.0, 99, 1 WHERE NOT EXISTS (SELECT 1 FROM categories WHERE name='其它');

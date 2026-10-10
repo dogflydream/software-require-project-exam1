@@ -8,12 +8,14 @@ import PublishDialog from '@/components/PublishDialog.vue'
 import { api } from '@/lib/api'
 import { useAuthStore } from '@/stores/auth'
 import { useUiStore } from '@/stores/ui'
-import { carbonOf, catChip, itemStatusChip, itemStatusLabel } from '@/lib/format'
+import { useCategoryStore } from '@/stores/category'
+import { catChip, itemStatusChip, itemStatusLabel, reviewChip, reviewLabel } from '@/lib/format'
 
 const route = useRoute()
 const router = useRouter()
 const auth = useAuthStore()
 const ui = useUiStore()
+const categories = useCategoryStore()
 
 const item = ref(null)
 const loading = ref(true)
@@ -27,6 +29,8 @@ const reporting = ref(false)
 
 const isOwner = computed(() => auth.user && item.value && item.value.owner_id === auth.user.id)
 const canReserve = computed(() => auth.isLoggedIn && item.value && !isOwner.value && item.value.status === 'available')
+const isPending = computed(() => item.value && item.value.review_status !== 'approved')
+const carbonFactor = computed(() => categories.factorOf(item.value?.category))
 
 async function load() {
   loading.value = true
@@ -105,7 +109,7 @@ async function askOffshelf() {
   }
 }
 
-onMounted(load)
+onMounted(() => { categories.load(); load() })
 </script>
 
 <template>
@@ -140,7 +144,7 @@ onMounted(load)
           </div>
           <div class="p-3 rounded-xl bg-surface border border-line">
             <p class="text-[11px] text-subtle">单次减碳</p>
-            <p class="mt-0.5 text-lg font-bold text-ink tnum">{{ carbonOf(item.category) }} kg</p>
+            <p class="mt-0.5 text-lg font-bold text-ink tnum">{{ carbonFactor }} kg</p>
           </div>
         </div>
       </div>
@@ -148,9 +152,25 @@ onMounted(load)
       <!-- 信息 -->
       <div>
         <div class="flex flex-wrap items-center gap-2">
-          <span class="px-2 py-0.5 rounded-md text-[11px] font-medium border" :class="catChip(item.category)">{{ item.category }}</span>
+          <span class="px-2 py-0.5 rounded-md text-[11px] font-medium border inline-flex items-center gap-1" :class="catChip(item.category)">
+            <Icon :name="categories.iconOf(item.category)" :size="12" />{{ item.category }}
+          </span>
           <span class="px-2.5 py-0.5 rounded-lg text-[11px] font-semibold" :class="itemStatusChip(item.status)">{{ itemStatusLabel(item.status) }}</span>
+          <span v-if="isPending" class="px-2.5 py-0.5 rounded-lg text-[11px] font-semibold" :class="reviewChip(item.review_status)">{{ reviewLabel(item.review_status) }}</span>
           <span class="inline-flex items-center gap-1 text-[11px] text-subtle"><Icon name="heart" :size="12" />{{ item.favorite_count }} 人收藏</span>
+        </div>
+
+        <!-- 待审核/已驳回提示：仅物主与管理员可见该物品 -->
+        <div v-if="isPending" class="mt-3 p-3.5 rounded-xl flex items-start gap-2.5 text-[13px]"
+             :class="item.review_status === 'rejected' ? 'bg-red-50 dark:bg-red-500/10 text-red-700 dark:text-red-300' : 'bg-amber-50 dark:bg-amber-400/10 text-amber-700 dark:text-amber-300'">
+          <Icon name="info" :size="17" class="mt-px shrink-0" />
+          <span>
+            <template v-if="item.review_status === 'rejected'">
+              该物品审核未通过，暂不对外展示。<template v-if="item.review_note">驳回理由：{{ item.review_note }}。</template>
+              修改后可重新提交审核。
+            </template>
+            <template v-else>该物品正在审核中，通过后将在市集展示。</template>
+          </span>
         </div>
 
         <h1 class="mt-3 text-2xl font-bold text-ink leading-snug">{{ item.title }}</h1>

@@ -79,6 +79,9 @@ MIGRATIONS = [
     ("users", "bio", "TEXT"),
     ("users", "contact", "TEXT"),
     ("items", "image", "TEXT"),
+    ("items", "review_status", "TEXT DEFAULT 'approved'"),
+    ("items", "review_note", "TEXT"),
+    ("items", "updated_at", "TEXT"),
 ]
 
 

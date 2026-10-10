@@ -1,11 +1,14 @@
 <script setup>
 import Icon from './Icon.vue'
-import { catBg, catFg, catIcon } from '@/lib/format'
+import { catBg, catFg, itemCatIcon } from '@/lib/format'
+import { useCategoryStore } from '@/stores/category'
 
-const props = defineProps({
+defineProps({
   item: { type: Object, required: true },
   ratio: { type: String, default: 'aspect-[4/3]' },
 })
+
+const categories = useCategoryStore()
 </script>
 
 <template>
@@ -14,7 +17,7 @@ const props = defineProps({
     <img v-if="item.image" :src="item.image" :alt="item.title" loading="lazy"
          class="w-full h-full object-cover" />
     <div v-else class="w-full h-full grid place-items-center" :class="catBg(item.category)">
-      <Icon :name="catIcon(item.category)" :size="34" :class="catFg(item.category)" />
+      <Icon :name="itemCatIcon(item, categories.list)" :size="34" :class="catFg(item.category)" />
     </div>
   </div>
 </template>
