@@ -2,25 +2,50 @@
 
 软件工程实验项目：基于 **增量模型** 开发的校园闲置物品循环流转平台。
 
-技术栈：Python 3.12 + FastAPI + SQLite + Vue 3 (CDN) + Tailwind CSS (CDN)
+技术栈：Python 3.12 + FastAPI + SQLite（后端）· Vue 3 + Vite + Vue Router + Pinia + Tailwind CSS（前端）
 
 ## 快速启动
 
+### 方式一：直接运行（使用已构建的前端）
+
 ```bash
-# 安装依赖（首次）
-uv sync
-
-# 启动开发服务器
-uv run uvicorn main:app --reload
-
-# 浏览器访问
-http://127.0.0.1:8000
+uv sync                              # 安装后端依赖（首次）
+uv run uvicorn main:app --reload     # 启动服务
+# 浏览器访问 http://127.0.0.1:8000
 ```
 
-首次启动会自动创建 `campus.db` 并注入种子数据（5 个用户、13+ 件物品、礼品、订单、举报各若干）。
+前端构建产物已提交在 `static/`，无需 Node 环境即可直接运行。
 
-- 管理员账号：管理员老师（选择该身份可进入「后台管理」）
-- 普通学生：张绿循、李循环、王低碳、赵再利用
+### 方式二：前端开发模式（改前端代码时）
+
+```bash
+# 终端 1：启动后端
+uv run uvicorn main:app --port 8011
+
+# 终端 2：启动前端热更新（Vite 已配置 /api 代理到 8011）
+cd web
+bun install
+bun run dev        # http://127.0.0.1:5173
+
+# 需要产出可部署版本时
+bun run build      # 输出到 ../static
+```
+
+首次启动会自动创建 `campus.db` 并注入种子数据（5 个用户、13+ 件物品、礼品、订单、举报、积分流水若干）。
+
+### 演示账号
+
+密码统一为 `campus123`（登录页提供一键填充）：
+
+| 学号 | 姓名 | 角色 |
+|------|------|------|
+| 20230101 | 张绿循 | 学生（卖家） |
+| 20230205 | 李循环 | 学生 |
+| 20230312 | 王低碳 | 学生 |
+| 20230418 | 赵再利用 | 学生 |
+| A000000 | 管理员老师 | 管理员 |
+
+> 多角色演示：用多个浏览器窗口（或普通/隐私窗口）分别登录不同账号即可，无需切换身份。
 
 ## 功能模块（按增量交付）
 
@@ -32,10 +57,96 @@ http://127.0.0.1:8000
 | 3 | v0.3.0-inc3 | 循环度与减碳量估算、环保先锋榜、学院减碳排行大屏 |
 | 4 | v0.4.0-inc4 | 订单：预约意向 → 卖家确认 → 线下验货自提（自提码）→ 完成流转（循环度 +1、卖家 +20 分）；状态机扭转校验 |
 | 5 | v1.0.0-release | 后台：物品下架/恢复、违规举报与审核、平台全局汇总卡片 |
+| 6 | — | **会话认证与授权**：密码哈希、服务端会话、修复越权（IDOR）、提权与 SQL 注入防护 |
+| 7 | — | **前端工程化**：Vue 3 + Vite 工程、独立登录/注册页、资料编辑与头像、物品图片 |
+
+## 安全设计（重点）
+
+### 身份来源：服务端会话，而非客户端参数
+
+早期版本的身份完全取自请求体/查询参数中的 `user_id`，任何调用方传入 `user_id=1`
+即可读取后台数据与查看他人订单，属典型**越权（IDOR）**。现已修复：
+
+- 登录成功后服务端签发随机会话令牌，写入 `HttpOnly + SameSite=Lax` Cookie；
+- 所有受保护接口通过 `current_user` 依赖从会话推导身份，**请求中的任何
+  `user_id` / `owner_id` / `reporter_id` 一律被忽略**；
+- 密码使用 PBKDF2-HMAC-SHA256 加盐哈希存储（12 万轮），数据库不存明文；
+- 管理员接口统一经 `require_admin` 校验，非 admin 一律 403，未登录一律 401。
+
+### 权限边界一览
+
+| 边界 | 规则 |
+|------|------|
+| 未登录 | 可浏览市集/商城/大屏；访问个人中心、订单、收藏、发布等返回 401 |
+| 普通学生 | 只能读写自己的资料、订单、收藏、流水；不能访问任何 `/api/admin/*` |
+| 资源级 | 修改/下架物品须为物主；订单确认须为卖家、完成/取消须为参与方 |
+| 管理员 | 可审核物品、处理举报、查看全平台订单与用户、管理礼品 |
+| 提权防护 | 注册与改资料时夹带 `role`/`points` 字段会被请求模型忽略，无法自我提权 |
+| 注入防护 | 全部 SQL 使用参数化占位符；枚举类参数另有正则校验 |
+
+### 图片上传
+
+头像与物品图片由前端等比压缩为 data URL 提交，服务端：类型白名单（拒绝 SVG 以防
+XSS）、大小上限 2MB、文件名由服务端生成（防路径穿越），落盘至 `static/uploads/`。
+
+### 回归测试
+
+```bash
+uv run uvicorn main:app --port 8011   # 另开终端启动服务
+python tests_auth_regression.py       # 72 项断言：认证/越权/提权/注入
+```
+
+## 界面能力
+
+| 能力 | 说明 |
+|------|------|
+| 独立登录/注册页 | `/login`、`/register` 整屏布局，含演示账号一键填充、密码强度提示 |
+| 物品图片 | 发布/编辑支持上传与预览；卡片、详情、订单、收藏、后台审核均展示；无图按分类着色占位 |
+| 资料与头像 | `/me/edit` 修改姓名/学院/简介/联系方式，上传头像，修改密码 |
+| 公开用户主页 | `/u/:id` 展示用户环保统计与在售物品（不含隐私信息） |
+| 设计令牌 + 深色模式 | 语义色变量驱动，一键切换并持久化，跟随系统初始值 |
+| 矢量图标 | 全部界面图标为内联 SVG 组件，不依赖 emoji 字体 |
+| 无障碍 | 可见焦点环、`aria-*` 语义、模态 `role=dialog`、Toast `aria-live`、`prefers-reduced-motion` 降级 |
+| 响应式 | 375/768/1024/1440 断点，网格 1→2→3→4 列自适应，无横向溢出 |
+| SPA 路由 | 深链可直接访问或刷新（后端回退到 index.html），路由守卫控制访问 |
+
+## 核心 API 一览
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| POST | /api/auth/register · /login · /logout | 注册 / 登录 / 退出（会话 Cookie） |
+| GET | /api/auth/me | 当前登录用户 |
+| POST | /api/auth/password | 修改密码（成功后所有会话失效） |
+| GET | /api/users · /api/users/{id}/profile | 公开用户列表 / 公开主页 |
+| PATCH | /api/users/me | 更新本人资料 |
+| POST | /api/users/me/avatar | 上传本人头像 |
+| GET | /api/me/summary | 本人私密聚合（统计 + 资料） |
+| GET | /api/items?category=&keyword=&sort=&limit=&offset= | 物品列表 / 筛选 / 搜索 / 排序 / 分页 |
+| GET | /api/items/mine · /api/items/{id} | 我发布的 / 物品详情 |
+| POST · PATCH · DELETE | /api/items… | 发布（+10 分）/ 修改 / 下架（仅物主） |
+| GET · POST · DELETE | /api/favorites… | 收藏列表 / 收藏 / 取消收藏 |
+| GET | /api/point-logs | 本人积分流水 |
+| GET | /api/products · POST /api/redeem | 礼品列表 / 积分兑换 |
+| GET | /api/stats/summary · /trends | 全局汇总 / 近 14 日趋势与分类分布 |
+| GET | /api/rank/users · /rank/colleges | 环保先锋榜 / 学院减碳排行 |
+| GET · POST | /api/orders | 本人订单 / 发起预约 |
+| POST | /api/orders/{id}/confirm · /complete · /cancel | 订单状态扭转（自提码校验） |
+| POST | /api/reports | 举报违规物品 |
+| GET | /api/admin/summary · items · reports · orders · users | 后台数据（仅管理员） |
+| POST | /api/admin/items/{id}/offshelf · /restore · reports/{id}/resolve | 后台物品与举报操作（仅管理员） |
+| POST/PATCH/DELETE | /api/admin/products… | 礼品增删改（仅管理员） |
+
+接口文档（Swagger）：启动后访问 http://127.0.0.1:8000/docs
+
+## 后端实现要点
+
+- **连接与事务**：`database.db_session()` 上下文管理器统一提交/回滚/关闭；多表写操作单事务，杜绝半成功状态。
+- **并发安全**：扣积分与减库存使用条件更新（`WHERE points >= ?` / `WHERE stock > 0`）并检查 `rowcount`，避免并发透支与超卖；连接启用 `busy_timeout` 与 WAL。
+- **幂等迁移**：旧库通过 `PRAGMA table_info` 探测缺失列并 `ALTER TABLE` 补齐，兼容已存在的数据库文件。
+- **统一异常**：Pydantic 校验错误与未捕获异常统一转为中文 `detail` JSON，不泄漏堆栈。
+- **索引**：为市集筛选、订单归属、积分流水、举报待办、收藏、会话建立索引。
 
 ## 版本回滚演示
-
-每个增量提交后均为可运行状态，可随时切换：
 
 ```bash
 git tag                    # 查看全部版本
@@ -43,19 +154,21 @@ git checkout v0.2.0-inc2   # 回滚到增量 2 演示
 git checkout main          # 回到最新版本
 ```
 
-## 核心 API 一览
+## 目录结构
 
-| 方法 | 路径 | 说明 |
-|------|------|------|
-| GET | /api/items?category=&keyword= | 物品列表/筛选/搜索 |
-| POST | /api/items | 发布闲置（+10 碳积分） |
-| GET | /api/point-logs?user_id= | 积分流水 |
-| GET | /api/products · POST /api/redeem | 礼品列表 / 积分兑换 |
-| GET | /api/stats/summary · /api/rank/users · /api/rank/colleges | 统计与排行 |
-| POST | /api/orders | 买家发起预约意向 |
-| POST | /api/orders/{id}/confirm · /complete · /cancel | 订单状态扭转（自提码校验） |
-| POST | /api/reports | 举报违规物品 |
-| GET | /api/admin/summary · /api/admin/items · /api/admin/reports | 后台数据（仅管理员） |
-| POST | /api/admin/items/{id}/offshelf · /restore · /api/admin/reports/{id}/resolve | 后台操作（仅管理员） |
+```
+main.py            FastAPI 应用与全部路由（含权限边界）
+auth.py            密码哈希、会话、current_user / require_admin 依赖
+database.py        连接、事务上下文、幂等建表与迁移
+models.py          Pydantic 请求/响应模型
+schema.sql         建表、索引与种子数据
+tests_auth_regression.py  认证与越权回归测试
+web/               Vue 3 + Vite 前端工程（源码）
+static/            前端构建产物（由 FastAPI 托管）+ 用户上传图片
+docs/              需求规格说明书、系统设计文档、实验报告
+```
 
-接口文档（Swagger）：启动后访问 http://127.0.0.1:8000/docs
+## 文档
+
+- 需求规格说明书：`docs/软件需求规格说明书.md`
+- 系统概要与详细设计：`docs/系统概要与详细设计文档.md`
