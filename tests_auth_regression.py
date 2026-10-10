@@ -142,4 +142,60 @@ out.call("POST", "/api/auth/logout", {}, expect=200, label="退出")
 out.call("GET", "/api/auth/me", expect=401, label="退出后会话失效")
 
 print("=" * 80)
+print("八、会话令牌伪造 / 篡改")
+
+
+def raw_get(path, cookie, expect):
+    """绕过 CookieJar 直接指定原始 Cookie 头，验证服务端不信任客户端令牌。"""
+    global passed, failed
+    req = urllib.request.Request(BASE + path)
+    req.add_header("Cookie", cookie)
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            code = r.status
+    except urllib.error.HTTPError as e:
+        code = e.code
+    good = code == expect
+    passed, failed = passed + good, failed + (not good)
+    print(f"[{'PASS' if good else 'FAIL'}] GET    {path:52} -> {code} (期望 {expect}) 令牌 {cookie[:34]}")
+
+
+for tok in ["gc_session=forged-token-12345", "gc_session=", "gc_session=1", "gc_session=' OR '1'='1"]:
+    raw_get("/api/auth/me", tok, 401)
+raw_get("/api/admin/summary", "gc_session=forged-admin", 401)
+
+print("=" * 80)
+print("九、提权尝试：注册或改资料时夹带高权限字段")
+esc = Client()
+esc.call("POST", "/api/auth/register",
+         {"name": "提权测试生", "student_no": "ESC" + str(int(time.time()))[-6:], "college": "测试学院",
+          "password": "test123456", "role": "admin", "points": 999999}, expect=201, label="注册夹带 role/points")
+esc_me = esc.call("GET", "/api/auth/me", expect=200, label="读取注册结果")
+role_ok = esc_me.get("role") == "student"
+pts_ok = esc_me.get("points") == 0
+print(f"        {'PASS' if role_ok else 'FAIL'} 注册后 role 仍为 student（实际 {esc_me.get('role')}）")
+print(f"        {'PASS' if pts_ok else 'FAIL'} 注册后 points 仍为 0（实际 {esc_me.get('points')}）")
+passed, failed = passed + role_ok + pts_ok, failed + (not role_ok) + (not pts_ok)
+
+esc.call("PATCH", "/api/users/me", {"role": "admin", "points": 999999}, expect=400, label="改资料夹带 role/points 被拒")
+esc_me2 = esc.call("GET", "/api/auth/me", expect=200, label="读取改资料结果")
+role_ok2 = esc_me2.get("role") == "student"
+pts_ok2 = esc_me2.get("points") == 0
+print(f"        {'PASS' if role_ok2 else 'FAIL'} 改资料后 role 仍为 student（实际 {esc_me2.get('role')}）")
+print(f"        {'PASS' if pts_ok2 else 'FAIL'} 改资料后 points 仍为 0（实际 {esc_me2.get('points')}）")
+passed, failed = passed + role_ok2 + pts_ok2, failed + (not role_ok2) + (not pts_ok2)
+esc.call("GET", "/api/admin/summary", expect=403, label="提权后仍无法访问后台")
+
+print("=" * 80)
+print("十、SQL 注入（参数化占位符防护）")
+inj = Client()
+inj.call("POST", "/api/auth/login", {"login": "' OR '1'='1' --", "password": "x"}, expect=401, label="登录名注入")
+inj.call("POST", "/api/auth/login", {"login": "20230101", "password": "' OR '1'='1"}, expect=401, label="密码注入")
+rows = inj.call("GET", "/api/items?keyword=" + urllib.parse.quote("' OR 1=1 --"), expect=200, label="搜索关键词注入")
+empty_ok = isinstance(rows, list) and len(rows) == 0
+print(f"        {'PASS' if empty_ok else 'FAIL'} 注入关键词未返回全部数据（返回 {len(rows) if isinstance(rows, list) else rows} 条）")
+passed, failed = passed + empty_ok, failed + (not empty_ok)
+inj.call("GET", "/api/items?category=" + urllib.parse.quote("' OR '1'='1"), expect=422, label="分类注入被枚举校验拒绝")
+
+print("=" * 80)
 print(f"结果：通过 {passed}，失败 {failed}")
