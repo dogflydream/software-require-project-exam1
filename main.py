@@ -927,16 +927,28 @@ def admin_delete_product(product_id: int, admin: dict = Depends(require_admin)) 
 
 
 # =======================================================================
-# 静态资源与首页
+# 静态资源与前端路由
 # =======================================================================
-@app.get("/")
-def index() -> FileResponse:
-    return FileResponse(STATIC_DIR / "index.html")
-
-
 @app.get("/favicon.svg")
 def favicon() -> FileResponse:
     return FileResponse(STATIC_DIR / "favicon.svg", media_type="image/svg+xml")
 
 
+# 挂载构建产物（/static/assets/* 等）
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+
+
+@app.get("/{full_path:path}", include_in_schema=False)
+def spa_fallback(full_path: str):
+    """SPA 前端路由回退：非 /api、非 /static 的路径一律返回 index.html。
+
+    这样 /login、/me、/items/3 等前端路由可直接访问或刷新而不 404。
+    未被上面路由匹配的 /api/* 会落到这里，显式返回 404 JSON 而非 HTML。
+    """
+    if full_path.startswith("api/"):
+        raise HTTPException(status_code=404, detail="接口不存在")
+    index = STATIC_DIR / "index.html"
+    if not index.exists():
+        raise HTTPException(status_code=503, detail="前端尚未构建，请在 web/ 目录执行 bun run build")
+    return FileResponse(index)
+
