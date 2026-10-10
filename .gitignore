@@ -8,3 +8,10 @@ campus.db
 # 实验报告构建产物
 docs/reports/render/
 docs/reports/plantuml.jar
+
+# 用户上传的图片（运行时产物，可再生）
+static/uploads/
+
+# 前端构建产物与依赖
+web/node_modules/
+web/dist/

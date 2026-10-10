@@ -99,3 +99,93 @@ CREATE TABLE IF NOT EXISTS reports (
 
 -- 种子数据：一条待处理举报
 INSERT INTO reports (item_id, reporter_id, reason) SELECT 6, 5, '物品描述与实物不符，疑似损坏' WHERE NOT EXISTS (SELECT 1 FROM reports);
+
+-- 绿循校园 数据库结构（增量 6：收藏关注）
+CREATE TABLE IF NOT EXISTS favorites (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL REFERENCES users(id),
+    item_id INTEGER NOT NULL REFERENCES items(id),
+    created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+    UNIQUE (user_id, item_id)
+);
+
+-- 查询性能索引：市集筛选、订单归属、流水与举报待办
+CREATE INDEX IF NOT EXISTS idx_items_status_created ON items(status, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_items_category ON items(category);
+CREATE INDEX IF NOT EXISTS idx_items_owner ON items(owner_id);
+CREATE INDEX IF NOT EXISTS idx_orders_buyer ON orders(buyer_id, id DESC);
+CREATE INDEX IF NOT EXISTS idx_orders_seller ON orders(seller_id, id DESC);
+CREATE INDEX IF NOT EXISTS idx_orders_item ON orders(item_id);
+CREATE INDEX IF NOT EXISTS idx_point_logs_user ON point_logs(user_id, id DESC);
+CREATE INDEX IF NOT EXISTS idx_reports_status ON reports(status, id DESC);
+CREATE INDEX IF NOT EXISTS idx_favorites_user ON favorites(user_id, id DESC);
+
+-- 绿循校园 种子数据（增量 6 补全）：碳积分流水账本
+-- 依据 BR2-2「每笔积分变动必须写入 point_logs」补齐可审计流水；
+-- 每个用户的流水 delta 合计与其 users.points 严格一致，不改变任何既有积分余额与统计值。
+-- 守卫按「该用户尚无流水」判断，整批插入，保证重复启动幂等。
+
+-- 张绿循 120 = 发布 4 件×10 + 完成流转 4 次×20
+INSERT INTO point_logs (user_id, delta, reason, created_at)
+SELECT u.id, v.delta, v.reason, datetime('now','localtime', v.off)
+FROM users u JOIN (
+    SELECT 10 AS delta, '发布闲置《《数据结构（C语言版）》严蔚敏》获得碳积分' AS reason, '-13 days' AS off
+    UNION ALL SELECT 10, '发布闲置《《高等数学》同济第七版上下册》获得碳积分', '-12 days'
+    UNION ALL SELECT 10, '发布闲置《《线性代数》第六版》获得碳积分', '-11 days'
+    UNION ALL SELECT 10, '发布闲置《宿舍小冰箱》获得碳积分', '-10 days'
+    UNION ALL SELECT 20, '完成流转《《线性代数》第六版》获得碳积分', '-9 days'
+    UNION ALL SELECT 20, '完成流转《《线性代数》第六版》获得碳积分', '-6 days'
+    UNION ALL SELECT 20, '完成流转《《线性代数》第六版》获得碳积分', '-4 days'
+    UNION ALL SELECT 20, '完成流转《宿舍小冰箱》获得碳积分', '-2 days'
+) v WHERE u.student_no='20230101'
+  AND NOT EXISTS (SELECT 1 FROM point_logs pl WHERE pl.user_id = u.id);
+
+-- 李循环 80 = 发布 3 件×10 + 完成流转 2 次×20 + 平台上线活跃奖励 10
+INSERT INTO point_logs (user_id, delta, reason, created_at)
+SELECT u.id, v.delta, v.reason, datetime('now','localtime', v.off)
+FROM users u JOIN (
+    SELECT 10 AS delta, '发布闲置《2025考研英语一真题黄皮书》获得碳积分' AS reason, '-13 days' AS off
+    UNION ALL SELECT 10, '发布闲置《肖秀荣政治精讲精练+1000题》获得碳积分', '-12 days'
+    UNION ALL SELECT 10, '发布闲置《《考研数学复习全书》》获得碳积分', '-11 days'
+    UNION ALL SELECT 20, '完成流转《《考研数学复习全书》》获得碳积分', '-7 days'
+    UNION ALL SELECT 20, '完成流转《《考研数学复习全书》》获得碳积分', '-3 days'
+    UNION ALL SELECT 10, '平台上线活跃奖励', '-14 days'
+) v WHERE u.student_no='20230205'
+  AND NOT EXISTS (SELECT 1 FROM point_logs pl WHERE pl.user_id = u.id);
+
+-- 王低碳 60 = 发布 3 件×10 + 完成流转 1 次×20 + 平台上线活跃奖励 10
+INSERT INTO point_logs (user_id, delta, reason, created_at)
+SELECT u.id, v.delta, v.reason, datetime('now','localtime', v.off)
+FROM users u JOIN (
+    SELECT 10 AS delta, '发布闲置《置物收纳架（三层）》获得碳积分' AS reason, '-13 days' AS off
+    UNION ALL SELECT 10, '发布闲置《小米台灯 Pro》获得碳积分', '-12 days'
+    UNION ALL SELECT 10, '发布闲置《旧自行车（已循环）》获得碳积分', '-8 days'
+    UNION ALL SELECT 20, '完成流转《旧自行车（已循环）》获得碳积分', '-5 days'
+    UNION ALL SELECT 10, '平台上线活跃奖励', '-14 days'
+) v WHERE u.student_no='20230312'
+  AND NOT EXISTS (SELECT 1 FROM point_logs pl WHERE pl.user_id = u.id);
+
+-- 赵再利用 30 = 发布 3 件×10 + 完成流转 2 次×20 - 兑换礼品 40
+INSERT INTO point_logs (user_id, delta, reason, created_at)
+SELECT u.id, v.delta, v.reason, datetime('now','localtime', v.off)
+FROM users u JOIN (
+    SELECT 10 AS delta, '发布闲置《英语四级词汇书 闪过》获得碳积分' AS reason, '-12 days' AS off
+    UNION ALL SELECT 10, '发布闲置《自行车（捷安特 ATX）》获得碳积分', '-11 days'
+    UNION ALL SELECT 10, '发布闲置《《新概念英语》全套》获得碳积分', '-10 days'
+    UNION ALL SELECT 20, '完成流转《《新概念英语》全套》获得碳积分', '-6 days'
+    UNION ALL SELECT 20, '完成流转《《新概念英语》全套》获得碳积分', '-3 days'
+    UNION ALL SELECT -40, '兑换礼品「食堂 5 元代金券」', '-1 days'
+) v WHERE u.student_no='20230418'
+  AND NOT EXISTS (SELECT 1 FROM point_logs pl WHERE pl.user_id = u.id);
+
+-- 绿循校园 数据库结构（增量 6：会话认证与资料）
+CREATE TABLE IF NOT EXISTS sessions (
+    token TEXT PRIMARY KEY,
+    user_id INTEGER NOT NULL REFERENCES users(id),
+    created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+    expires_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
+
+-- 绿循校园 数据库结构（增量 7：用户资料与物品图片）
+-- 说明：SQLite 不支持 ADD COLUMN IF NOT EXISTS，故用 ALTER 失败忽略的方式幂等补列。

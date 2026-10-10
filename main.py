@@ -1,30 +1,53 @@
-"""绿循校园——校园闲置教材与物品循环流转系统。"""
+"""绿循校园——校园闲置教材与物品循环流转系统。
+
+分层：
+- 常量与业务规则（REWARD_*、CARBON_FACTOR、ORDER_TRANSITIONS）
+- 认证与授权层：auth.py（会话 Cookie 派生身份）
+- API 控制层：FastAPI 路由
+- 业务逻辑层：_transition / estimate_carbon 等纯业务函数
+- 数据访问层：database.py
+
+安全边界（本版本重点）：
+- 所有受保护接口的身份来自服务端会话，客户端传入的任何 user_id 一律被忽略；
+- 管理员接口统一经 require_admin 校验，非 admin 一律 403；
+- 资源级授权：修改/下架物品需为物主，订单操作需为订单参与方。
+"""
+import base64
+import binascii
+import logging
+import re
 import secrets
-import sqlite3
+import uuid
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import List, Optional
 
-from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import FileResponse
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
+import auth
 import database
+from auth import SESSION_COOKIE, SESSION_DAYS, current_user, hash_password, require_admin, verify_password
 from models import (
-    AdminItemOut, Health, ItemCreate, ItemOut, OrderAction, OrderCreate, OrderOut,
-    PointLogOut, ProductOut, RedeemOut, RedeemRequest, ReportCreate, ReportOut,
-    UserAction, UserOut,
+    AdminItemOut, FavoriteOut, Health, ItemCreate, ItemDetailOut, ItemOut, ItemUpdate,
+    LoginRequest, OrderAction, OrderCreate, OrderOut, PasswordChange, PointLogOut,
+    ProductCreate, ProductOut, ProductUpdate, ProfileUpdate, RedeemOut, RedeemRequest,
+    RegisterRequest, ReportCreate, ReportOut, UserOut, UserPublic,
 )
 
-app = FastAPI(title="绿循校园", version="0.4.0")
+APP_NAME = "绿循校园"
+APP_VERSION = "2.0.0"
+
+logger = logging.getLogger("greencampus")
 
 STATIC_DIR = Path(__file__).parent / "static"
+UPLOAD_DIR = STATIC_DIR / "uploads"
 
-# 发布一件闲置奖励的碳积分
 REWARD_PUBLISH = 10
-# 完成一次流转奖励卖家的碳积分
 REWARD_CYCLE = 20
 
-# 订单状态机：当前状态 -> 允许扭转的目标状态
 ORDER_TRANSITIONS = {
     "reserved": {"confirmed", "cancelled"},
     "confirmed": {"completed", "cancelled"},
@@ -37,12 +60,60 @@ STATUS_LABEL = {
     "cancelled": "已取消",
 }
 
-# 核心指标算法：单次流转的减碳量估算系数（kg CO₂e，按物品类别）
 CARBON_FACTOR = {"教材": 2.5, "考研": 2.0, "生活品": 3.5}
+TREE_ABSORB_PER_YEAR = 18.0
+
+# 图片上传约束：客户端先等比压缩再以 data URL 提交，服务端解码落盘
+MAX_IMAGE_BYTES = 2 * 1024 * 1024  # 2MB
+ALLOWED_IMAGE_TYPES = {
+    "image/png": "png",
+    "image/jpeg": "jpg",
+    "image/webp": "webp",
+    "image/gif": "gif",
+}
+DATA_URL_RE = re.compile(r"^data:(image/[a-zA-Z0-9.+-]+);base64,(.+)$", re.S)
+
+# 演示账号初始密码（仅用于课程演示；生产环境应由用户自行注册）
+DEMO_PASSWORD = "campus123"
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    database.init_db()
+    _seed_demo_passwords()
+    UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    logger.info("%s v%s 启动完成，数据库就绪", APP_NAME, APP_VERSION)
+    yield
+
+
+def _seed_demo_passwords() -> None:
+    """为种子账号补齐初始密码（仅当尚未设置时），使演示可直接登录。"""
+    with database.db_session() as conn:
+        rows = conn.execute("SELECT id FROM users WHERE password_hash IS NULL OR password_hash = ''").fetchall()
+        for r in rows:
+            conn.execute("UPDATE users SET password_hash = ? WHERE id = ?", (hash_password(DEMO_PASSWORD), r["id"]))
+
+
+app = FastAPI(title=APP_NAME, version=APP_VERSION, lifespan=lifespan)
+
+
+# ---------------- 统一异常处理 ----------------
+@app.exception_handler(RequestValidationError)
+async def validation_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
+    first = exc.errors()[0] if exc.errors() else {}
+    field = ".".join(str(p) for p in first.get("loc", ()) if p not in ("body", "query"))
+    msg = first.get("msg", "参数校验失败")
+    detail = f"参数「{field}」不合法：{msg}" if field else f"参数不合法：{msg}"
+    return JSONResponse(status_code=422, content={"detail": detail})
+
+
+@app.exception_handler(Exception)
+async def unhandled_handler(request: Request, exc: Exception) -> JSONResponse:
+    logger.exception("未处理异常 %s %s", request.method, request.url.path)
+    return JSONResponse(status_code=500, content={"detail": "服务器内部错误，请稍后重试"})
 
 
 def estimate_carbon(category: str) -> float:
-    """单次流转减碳量估算。"""
     return CARBON_FACTOR.get(category, 2.0)
 
 
@@ -50,35 +121,228 @@ def rows_to_dicts(rows) -> List[dict]:
     return [dict(r) for r in rows]
 
 
-@app.on_event("startup")
-def startup() -> None:
-    database.init_db()
+def save_data_url(data_url: str) -> str:
+    """解码 data URL 图片并落盘，返回可访问的相对路径。
+
+    只接受白名单图片类型并限制大小，文件名由服务端生成（不采用客户端文件名），
+    避免路径穿越与可执行文件上传。
+    """
+    if not data_url:
+        raise HTTPException(status_code=400, detail="图片内容为空")
+    m = DATA_URL_RE.match(data_url.strip())
+    if not m:
+        raise HTTPException(status_code=400, detail="图片格式不正确，请上传 PNG/JPG/WebP/GIF")
+    mime, b64 = m.group(1), m.group(2)
+    ext = ALLOWED_IMAGE_TYPES.get(mime.lower())
+    if not ext:
+        raise HTTPException(status_code=400, detail="不支持的图片类型，仅限 PNG/JPG/WebP/GIF")
+    try:
+        raw = base64.b64decode(b64, validate=True)
+    except (binascii.Error, ValueError):
+        raise HTTPException(status_code=400, detail="图片数据损坏，无法解析")
+    if len(raw) > MAX_IMAGE_BYTES:
+        raise HTTPException(status_code=400, detail=f"图片过大，请压缩到 {MAX_IMAGE_BYTES // 1024 // 1024}MB 以内")
+    if not raw:
+        raise HTTPException(status_code=400, detail="图片内容为空")
+    UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    filename = f"{uuid.uuid4().hex}.{ext}"
+    (UPLOAD_DIR / filename).write_bytes(raw)
+    return f"/static/uploads/{filename}"
 
 
+def set_session_cookie(response: Response, token: str) -> None:
+    """写入会话 Cookie：HttpOnly + SameSite=Lax，避免脚本读取与 CSRF。"""
+    response.set_cookie(
+        key=SESSION_COOKIE, value=token, max_age=SESSION_DAYS * 86400,
+        httponly=True, samesite="lax", path="/",
+    )
+
+
+# =======================================================================
+# 健康检查
+# =======================================================================
 @app.get("/api/health", response_model=Health)
 def health() -> Health:
-    return Health(status="ok", app="绿循校园")
+    return Health(status="ok", app=APP_NAME, version=APP_VERSION)
 
 
-@app.get("/api/users", response_model=List[UserOut])
+# =======================================================================
+# 认证：注册 / 登录 / 退出 / 当前身份
+# =======================================================================
+@app.post("/api/auth/register", response_model=UserOut, status_code=201)
+def register(payload: RegisterRequest, response: Response) -> dict:
+    """注册新账号并直接登录。学号唯一。"""
+    with database.db_session() as conn:
+        dup = conn.execute("SELECT 1 FROM users WHERE student_no = ?", (payload.student_no,)).fetchone()
+        if dup:
+            raise HTTPException(status_code=400, detail="该学号已注册，请直接登录")
+        cur = conn.execute(
+            "INSERT INTO users (name, student_no, college, role, points, password_hash) VALUES (?, ?, ?, 'student', 0, ?)",
+            (payload.name, payload.student_no, payload.college, hash_password(payload.password)),
+        )
+        user_id = cur.lastrowid
+        token = auth.create_session(conn, user_id)
+        row = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+    set_session_cookie(response, token)
+    return dict(row)
+
+
+@app.post("/api/auth/login", response_model=UserOut)
+def login(payload: LoginRequest, response: Response) -> dict:
+    """学号或姓名 + 密码登录。失败提示不区分账号是否存在，避免账号枚举。"""
+    with database.db_session() as conn:
+        row = conn.execute(
+            "SELECT * FROM users WHERE student_no = ? OR name = ? ORDER BY id LIMIT 1",
+            (payload.login, payload.login),
+        ).fetchone()
+        if not row or not verify_password(payload.password, row["password_hash"]):
+            raise HTTPException(status_code=401, detail="学号/姓名或密码不正确")
+        token = auth.create_session(conn, row["id"])
+    set_session_cookie(response, token)
+    return dict(row)
+
+
+@app.post("/api/auth/logout")
+def logout(request: Request, response: Response) -> dict:
+    token = request.cookies.get(SESSION_COOKIE)
+    if token:
+        with database.db_session() as conn:
+            auth.destroy_session(conn, token)
+    response.delete_cookie(SESSION_COOKIE, path="/")
+    return {"ok": True}
+
+
+@app.get("/api/auth/me", response_model=UserOut)
+def whoami(user: dict = Depends(current_user)) -> dict:
+    return user
+
+
+@app.post("/api/auth/password", status_code=200)
+def change_password(payload: PasswordChange, user: dict = Depends(current_user)) -> dict:
+    """修改密码；校验旧密码，成功后注销该用户的其它会话。"""
+    if not verify_password(payload.old_password, user["password_hash"]):
+        raise HTTPException(status_code=400, detail="原密码不正确")
+    with database.db_session() as conn:
+        conn.execute("UPDATE users SET password_hash = ? WHERE id = ?", (hash_password(payload.new_password), user["id"]))
+        conn.execute("DELETE FROM sessions WHERE user_id = ?", (user["id"],))
+    return {"ok": True, "message": "密码已更新，请重新登录"}
+
+
+# =======================================================================
+# 用户资料
+# =======================================================================
+@app.get("/api/users", response_model=List[UserPublic])
 def list_users() -> List[dict]:
-    conn = database.get_db()
-    rows = conn.execute("SELECT * FROM users ORDER BY id").fetchall()
-    conn.close()
+    """公开的用户列表（不含联系方式）。"""
+    with database.db_session() as conn:
+        rows = conn.execute("SELECT id, name, college, avatar, bio FROM users ORDER BY id").fetchall()
     return rows_to_dicts(rows)
+
+
+@app.patch("/api/users/me", response_model=UserOut)
+def update_profile(payload: ProfileUpdate, user: dict = Depends(current_user)) -> dict:
+    """更新本人资料（身份取自会话，不能改他人）。"""
+    fields = payload.model_dump(exclude_none=True)
+    if not fields:
+        raise HTTPException(status_code=400, detail="没有需要修改的内容")
+    with database.db_session() as conn:
+        if "name" in fields:
+            dup = conn.execute("SELECT 1 FROM users WHERE name = ? AND id != ?", (fields["name"], user["id"])).fetchone()
+            if dup:
+                raise HTTPException(status_code=400, detail="该姓名已被使用")
+        sets = ", ".join(f"{k} = ?" for k in fields)
+        conn.execute(f"UPDATE users SET {sets} WHERE id = ?", (*fields.values(), user["id"]))
+        row = conn.execute("SELECT * FROM users WHERE id = ?", (user["id"],)).fetchone()
+    return dict(row)
+
+
+@app.post("/api/users/me/avatar", response_model=UserOut)
+def upload_avatar(payload: dict, user: dict = Depends(current_user)) -> dict:
+    """上传本人头像（data URL）。"""
+    path = save_data_url(payload.get("image", ""))
+    with database.db_session() as conn:
+        conn.execute("UPDATE users SET avatar = ? WHERE id = ?", (path, user["id"]))
+        row = conn.execute("SELECT * FROM users WHERE id = ?", (user["id"],)).fetchone()
+    return dict(row)
+
+
+@app.get("/api/users/{user_id}/profile")
+def user_profile(user_id: int) -> dict:
+    """公开的用户主页聚合：资料 + 环保统计 + 在售物品（不含隐私与订单）。"""
+    with database.db_session() as conn:
+        user = conn.execute(
+            "SELECT id, name, college, role, points, avatar, bio, created_at FROM users WHERE id = ?", (user_id,)
+        ).fetchone()
+        if not user:
+            raise HTTPException(status_code=404, detail="用户不存在")
+        published = conn.execute("SELECT COUNT(*) FROM items WHERE owner_id = ?", (user_id,)).fetchone()[0]
+        carbon = conn.execute("SELECT COALESCE(SUM(carbon_saved), 0) FROM items WHERE owner_id = ?", (user_id,)).fetchone()[0]
+        cycles = conn.execute("SELECT COALESCE(SUM(cycle_count), 0) FROM items WHERE owner_id = ?", (user_id,)).fetchone()[0]
+        on_sale = conn.execute(
+            "SELECT COUNT(*) FROM items WHERE owner_id = ? AND status IN ('available','reserved')", (user_id,)
+        ).fetchone()[0]
+        items = conn.execute(
+            ITEM_SQL + " WHERE i.owner_id = ? AND i.status IN ('available','reserved') ORDER BY i.id DESC LIMIT 12",
+            (user_id,),
+        ).fetchall()
+    return {
+        **dict(user),
+        "stats": {
+            "published": published, "on_sale": on_sale, "cycles": cycles, "carbon_kg": round(carbon, 2),
+        },
+        "items": rows_to_dicts(items),
+    }
+
+
+@app.get("/api/me/summary")
+def my_summary(user: dict = Depends(current_user)) -> dict:
+    """本人私密聚合：资料 + 统计 + 最近流水（仅本人可见）。"""
+    uid = user["id"]
+    with database.db_session() as conn:
+        published = conn.execute("SELECT COUNT(*) FROM items WHERE owner_id = ?", (uid,)).fetchone()[0]
+        sold = conn.execute("SELECT COUNT(*) FROM orders WHERE seller_id = ? AND status='completed'", (uid,)).fetchone()[0]
+        bought = conn.execute("SELECT COUNT(*) FROM orders WHERE buyer_id = ? AND status='completed'", (uid,)).fetchone()[0]
+        active = conn.execute(
+            "SELECT COUNT(*) FROM orders WHERE (buyer_id = ? OR seller_id = ?) AND status IN ('reserved','confirmed')",
+            (uid, uid),
+        ).fetchone()[0]
+        carbon = conn.execute("SELECT COALESCE(SUM(carbon_saved), 0) FROM items WHERE owner_id = ?", (uid,)).fetchone()[0]
+        cycles = conn.execute("SELECT COALESCE(SUM(cycle_count), 0) FROM items WHERE owner_id = ?", (uid,)).fetchone()[0]
+        favorites = conn.execute("SELECT COUNT(*) FROM favorites WHERE user_id = ?", (uid,)).fetchone()[0]
+    return {
+        "user": user,
+        "stats": {
+            "published": published, "sold": sold, "bought": bought, "active_orders": active,
+            "cycles": cycles, "carbon_kg": round(carbon, 2), "favorites": favorites,
+        },
+    }
+
+
+# =======================================================================
+# 物品（市集）
+# =======================================================================
+ITEM_SQL = """
+    SELECT i.*, u.name AS owner_name, u.college AS owner_college, u.avatar AS owner_avatar
+    FROM items i JOIN users u ON u.id = i.owner_id
+"""
+
+SORT_SQL = {
+    "latest": "i.created_at DESC, i.id DESC",
+    "price_asc": "i.price ASC, i.id DESC",
+    "price_desc": "i.price DESC, i.id DESC",
+    "cycle": "i.cycle_count DESC, i.carbon_saved DESC, i.id DESC",
+}
 
 
 @app.get("/api/items", response_model=List[ItemOut])
 def list_items(
     category: Optional[str] = Query(None, pattern="^(教材|考研|生活品)$"),
-    keyword: Optional[str] = None,
+    keyword: Optional[str] = Query(None, max_length=50),
+    sort: str = Query("latest", pattern="^(latest|price_asc|price_desc|cycle)$"),
+    limit: int = Query(60, ge=1, le=200),
+    offset: int = Query(0, ge=0),
 ) -> List[dict]:
-    """物品列表检索与分类筛选。"""
-    sql = """
-        SELECT i.*, u.name AS owner_name, u.college AS owner_college
-        FROM items i JOIN users u ON u.id = i.owner_id
-        WHERE i.status IN ('available', 'reserved')
-    """
+    sql = ITEM_SQL + " WHERE i.status IN ('available', 'reserved')"
     params: list = []
     if category:
         sql += " AND i.category = ?"
@@ -86,136 +350,265 @@ def list_items(
     if keyword:
         sql += " AND (i.title LIKE ? OR i.description LIKE ?)"
         params += [f"%{keyword}%", f"%{keyword}%"]
-    sql += " ORDER BY i.created_at DESC, i.id DESC"
-    conn = database.get_db()
-    rows = conn.execute(sql, params).fetchall()
-    conn.close()
+    sql += f" ORDER BY {SORT_SQL[sort]} LIMIT ? OFFSET ?"
+    params += [limit, offset]
+    with database.db_session() as conn:
+        rows = conn.execute(sql, params).fetchall()
     return rows_to_dicts(rows)
 
 
+@app.get("/api/items/mine", response_model=List[ItemOut])
+def my_items(user: dict = Depends(current_user)) -> List[dict]:
+    """我发布的全部物品（身份取自会话）。"""
+    with database.db_session() as conn:
+        rows = conn.execute(ITEM_SQL + " WHERE i.owner_id = ? ORDER BY i.id DESC", (user["id"],)).fetchall()
+    return rows_to_dicts(rows)
+
+
+@app.get("/api/items/{item_id}", response_model=ItemDetailOut)
+def get_item(item_id: int, request: Request) -> dict:
+    """物品详情（收藏状态按会话判定，未登录则视为未收藏）。"""
+    token = request.cookies.get(SESSION_COOKIE)
+    viewer_id = None
+    with database.db_session() as conn:
+        if token:
+            u = auth.user_for_token(conn, token)
+            viewer_id = u["id"] if u else None
+        row = conn.execute(ITEM_SQL + " WHERE i.id = ?", (item_id,)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="物品不存在")
+        data = dict(row)
+        data["favorite_count"] = conn.execute("SELECT COUNT(*) FROM favorites WHERE item_id = ?", (item_id,)).fetchone()[0]
+        data["favorited"] = bool(viewer_id and conn.execute(
+            "SELECT 1 FROM favorites WHERE user_id = ? AND item_id = ?", (viewer_id, item_id)
+        ).fetchone())
+    return data
+
+
 @app.post("/api/items", response_model=ItemOut, status_code=201)
-def create_item(payload: ItemCreate) -> dict:
-    """发布闲置物品。"""
-    conn = database.get_db()
-    owner = conn.execute("SELECT * FROM users WHERE id = ?", (payload.owner_id,)).fetchone()
-    if not owner:
-        conn.close()
-        raise HTTPException(status_code=404, detail="用户不存在")
-    cur = conn.execute(
-        "INSERT INTO items (owner_id, title, category, description, price) VALUES (?, ?, ?, ?, ?)",
-        (payload.owner_id, payload.title, payload.category, payload.description, payload.price),
-    )
-    # 发布闲置赠送碳积分并记录流水
-    database.add_points(conn, payload.owner_id, REWARD_PUBLISH, f"发布闲置《{payload.title}》获得碳积分")
-    row = conn.execute(
-        """
-        SELECT i.*, u.name AS owner_name, u.college AS owner_college
-        FROM items i JOIN users u ON u.id = i.owner_id WHERE i.id = ?
-        """,
-        (cur.lastrowid,),
-    ).fetchone()
-    conn.commit()
-    conn.close()
+def create_item(payload: ItemCreate, user: dict = Depends(current_user)) -> dict:
+    """发布闲置物品（归属为当前登录用户，客户端无法指定 owner）。"""
+    image = save_data_url(payload.image) if payload.image else None
+    with database.db_session() as conn:
+        cur = conn.execute(
+            "INSERT INTO items (owner_id, title, category, description, price, image) VALUES (?, ?, ?, ?, ?, ?)",
+            (user["id"], payload.title, payload.category, payload.description, payload.price, image),
+        )
+        database.add_points(conn, user["id"], REWARD_PUBLISH, f"发布闲置《{payload.title}》获得碳积分")
+        row = conn.execute(ITEM_SQL + " WHERE i.id = ?", (cur.lastrowid,)).fetchone()
     return dict(row)
 
 
+@app.patch("/api/items/{item_id}", response_model=ItemOut)
+def update_item(item_id: int, payload: ItemUpdate, user: dict = Depends(current_user)) -> dict:
+    """物主修改自己物品（资源级授权：非物主 403）。"""
+    with database.db_session() as conn:
+        item = conn.execute("SELECT * FROM items WHERE id = ?", (item_id,)).fetchone()
+        if not item:
+            raise HTTPException(status_code=404, detail="物品不存在")
+        if item["owner_id"] != user["id"]:
+            raise HTTPException(status_code=403, detail="只能修改自己发布的物品")
+        if item["status"] in ("completed", "offshelf"):
+            raise HTTPException(status_code=400, detail="该物品已流转结束或已下架，不能修改")
+        fields = payload.model_dump(exclude_none=True)
+        if not fields:
+            raise HTTPException(status_code=400, detail="没有需要修改的内容")
+        if "price" in fields and item["status"] == "reserved":
+            raise HTTPException(status_code=400, detail="物品已被预约，不能修改价格")
+        if "image" in fields:
+            fields["image"] = save_data_url(fields["image"])
+        sets = ", ".join(f"{k} = ?" for k in fields)
+        conn.execute(f"UPDATE items SET {sets} WHERE id = ?", (*fields.values(), item_id))
+        row = conn.execute(ITEM_SQL + " WHERE i.id = ?", (item_id,)).fetchone()
+    return dict(row)
+
+
+@app.delete("/api/items/{item_id}", response_model=ItemOut)
+def offshelf_own_item(item_id: int, user: dict = Depends(current_user)) -> dict:
+    """物主下架自己物品（资源级授权）。"""
+    with database.db_session() as conn:
+        item = conn.execute("SELECT * FROM items WHERE id = ?", (item_id,)).fetchone()
+        if not item:
+            raise HTTPException(status_code=404, detail="物品不存在")
+        if item["owner_id"] != user["id"]:
+            raise HTTPException(status_code=403, detail="只能下架自己发布的物品")
+        if item["status"] == "offshelf":
+            raise HTTPException(status_code=400, detail="物品已是下架状态")
+        active = conn.execute(
+            "SELECT 1 FROM orders WHERE item_id = ? AND status IN ('reserved','confirmed')", (item_id,)
+        ).fetchone()
+        if active:
+            raise HTTPException(status_code=400, detail="该物品有进行中的订单，请先取消订单")
+        conn.execute("UPDATE items SET status = 'offshelf' WHERE id = ?", (item_id,))
+        row = conn.execute(ITEM_SQL + " WHERE i.id = ?", (item_id,)).fetchone()
+    return dict(row)
+
+
+# =======================================================================
+# 收藏（全部基于会话身份）
+# =======================================================================
+FAV_SQL = """
+    SELECT f.id, f.item_id, f.created_at, i.title AS item_title, i.category, i.price, i.status,
+           i.image, u.name AS owner_name
+    FROM favorites f JOIN items i ON i.id = f.item_id JOIN users u ON u.id = i.owner_id
+"""
+
+
+@app.get("/api/favorites", response_model=List[FavoriteOut])
+def list_favorites(user: dict = Depends(current_user)) -> List[dict]:
+    with database.db_session() as conn:
+        rows = conn.execute(FAV_SQL + " WHERE f.user_id = ? ORDER BY f.id DESC", (user["id"],)).fetchall()
+    return rows_to_dicts(rows)
+
+
+@app.post("/api/favorites", response_model=FavoriteOut, status_code=201)
+def add_favorite(payload: dict, user: dict = Depends(current_user)) -> dict:
+    item_id = payload.get("item_id")
+    if not isinstance(item_id, int):
+        raise HTTPException(status_code=422, detail="参数「item_id」不合法：应为整数")
+    with database.db_session() as conn:
+        item = conn.execute("SELECT 1 FROM items WHERE id = ?", (item_id,)).fetchone()
+        if not item:
+            raise HTTPException(status_code=404, detail="物品不存在")
+        if conn.execute("SELECT 1 FROM favorites WHERE user_id = ? AND item_id = ?", (user["id"], item_id)).fetchone():
+            raise HTTPException(status_code=400, detail="已收藏该物品")
+        cur = conn.execute("INSERT INTO favorites (user_id, item_id) VALUES (?, ?)", (user["id"], item_id))
+        row = conn.execute(FAV_SQL + " WHERE f.id = ?", (cur.lastrowid,)).fetchone()
+    return dict(row)
+
+
+@app.delete("/api/favorites/{item_id}")
+def remove_favorite(item_id: int, user: dict = Depends(current_user)) -> dict:
+    with database.db_session() as conn:
+        cur = conn.execute("DELETE FROM favorites WHERE user_id = ? AND item_id = ?", (user["id"], item_id))
+        if cur.rowcount == 0:
+            raise HTTPException(status_code=404, detail="尚未收藏该物品")
+    return {"ok": True}
+
+
+# =======================================================================
+# 碳积分与商城
+# =======================================================================
 @app.get("/api/point-logs", response_model=List[PointLogOut])
-def list_point_logs(user_id: int) -> List[dict]:
-    """某用户的积分流水。"""
-    conn = database.get_db()
-    rows = conn.execute(
-        "SELECT * FROM point_logs WHERE user_id = ? ORDER BY id DESC LIMIT 50", (user_id,)
-    ).fetchall()
-    conn.close()
+def list_point_logs(user: dict = Depends(current_user), limit: int = Query(50, ge=1, le=200)) -> List[dict]:
+    """本人积分流水（仅本人可见）。"""
+    with database.db_session() as conn:
+        rows = conn.execute(
+            "SELECT * FROM point_logs WHERE user_id = ? ORDER BY id DESC LIMIT ?", (user["id"], limit)
+        ).fetchall()
     return rows_to_dicts(rows)
 
 
 @app.get("/api/products", response_model=List[ProductOut])
 def list_products() -> List[dict]:
-    conn = database.get_db()
-    rows = conn.execute("SELECT * FROM products ORDER BY cost_points").fetchall()
-    conn.close()
+    with database.db_session() as conn:
+        rows = conn.execute("SELECT * FROM products ORDER BY cost_points").fetchall()
     return rows_to_dicts(rows)
 
 
 @app.post("/api/redeem", response_model=RedeemOut)
-def redeem(payload: RedeemRequest) -> RedeemOut:
-    """积分商城礼品兑换。"""
-    conn = database.get_db()
-    user = conn.execute("SELECT * FROM users WHERE id = ?", (payload.user_id,)).fetchone()
-    product = conn.execute("SELECT * FROM products WHERE id = ?", (payload.product_id,)).fetchone()
-    if not user or not product:
-        conn.close()
-        raise HTTPException(status_code=404, detail="用户或礼品不存在")
-    if product["stock"] <= 0:
-        conn.close()
-        raise HTTPException(status_code=400, detail="礼品库存不足")
-    if user["points"] < product["cost_points"]:
-        conn.close()
-        raise HTTPException(status_code=400, detail=f"碳积分不足，还差 {product['cost_points'] - user['points']} 分")
-    remaining = database.add_points(conn, payload.user_id, -product["cost_points"], f"兑换礼品「{product['name']}」")
-    conn.execute("UPDATE products SET stock = stock - 1 WHERE id = ?", (payload.product_id,))
-    conn.commit()
-    conn.close()
+def redeem(payload: RedeemRequest, user: dict = Depends(current_user)) -> RedeemOut:
+    """兑换礼品（扣分与减库存同事务；扣分对象为当前登录用户）。"""
+    with database.db_session() as conn:
+        product = conn.execute("SELECT * FROM products WHERE id = ?", (payload.product_id,)).fetchone()
+        if not product:
+            raise HTTPException(status_code=404, detail="礼品不存在")
+        if product["stock"] <= 0:
+            raise HTTPException(status_code=400, detail="礼品库存不足")
+        cur = conn.execute(
+            "UPDATE users SET points = points - ? WHERE id = ? AND points >= ?",
+            (product["cost_points"], user["id"], product["cost_points"]),
+        )
+        if cur.rowcount == 0:
+            fresh = conn.execute("SELECT points FROM users WHERE id = ?", (user["id"],)).fetchone()
+            raise HTTPException(status_code=400, detail=f"碳积分不足，还差 {product['cost_points'] - fresh[0]} 分")
+        conn.execute(
+            "INSERT INTO point_logs (user_id, delta, reason) VALUES (?, ?, ?)",
+            (user["id"], -product["cost_points"], f"兑换礼品「{product['name']}」"),
+        )
+        cur = conn.execute("UPDATE products SET stock = stock - 1 WHERE id = ? AND stock > 0", (payload.product_id,))
+        if cur.rowcount == 0:
+            raise HTTPException(status_code=400, detail="礼品库存不足")
+        remaining = conn.execute("SELECT points FROM users WHERE id = ?", (user["id"],)).fetchone()[0]
     return RedeemOut(ok=True, message=f"成功兑换「{product['name']}」，请到学生会办公室领取", remaining_points=remaining)
 
 
-@app.get("/api/stats/summary")
+# =======================================================================
+# 统计与排行
+# =======================================================================
 def stats_summary() -> dict:
-    """平台全局环保汇总指标。"""
-    conn = database.get_db()
-    total_published = conn.execute("SELECT COUNT(*) FROM items").fetchone()[0]
-    total_cycles = conn.execute("SELECT COALESCE(SUM(cycle_count), 0) FROM items").fetchone()[0]
-    total_carbon = conn.execute("SELECT COALESCE(SUM(carbon_saved), 0) FROM items").fetchone()[0]
-    total_users = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
-    total_points = conn.execute("SELECT COALESCE(SUM(points), 0) FROM users").fetchone()[0]
-    conn.close()
+    with database.db_session() as conn:
+        total_published = conn.execute("SELECT COUNT(*) FROM items").fetchone()[0]
+        total_cycles = conn.execute("SELECT COALESCE(SUM(cycle_count), 0) FROM items").fetchone()[0]
+        total_carbon = conn.execute("SELECT COALESCE(SUM(carbon_saved), 0) FROM items").fetchone()[0]
+        total_users = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+        total_points = conn.execute("SELECT COALESCE(SUM(points), 0) FROM users").fetchone()[0]
+        total_orders = conn.execute("SELECT COUNT(*) FROM orders").fetchone()[0]
     return {
         "total_published": total_published,
         "total_cycles": total_cycles,
         "total_carbon_kg": round(total_carbon, 2),
         "total_users": total_users,
         "total_points": total_points,
-        "trees_equivalent": round(total_carbon / 18.0, 1),  # 一棵树每年约吸收 18kg CO₂
+        "total_orders": total_orders,
+        "trees_equivalent": round(total_carbon / TREE_ABSORB_PER_YEAR, 1),
     }
 
 
+@app.get("/api/stats/summary")
+def stats() -> dict:
+    return stats_summary()
+
+
+@app.get("/api/stats/trends")
+def stats_trends(days: int = Query(14, ge=3, le=60)) -> dict:
+    with database.db_session() as conn:
+        rows = conn.execute(
+            """
+            SELECT date(o.updated_at) AS d, COUNT(*) AS cycles,
+                   COALESCE(SUM(CASE i.category
+                       WHEN '教材' THEN 2.5 WHEN '考研' THEN 2.0 WHEN '生活品' THEN 3.5 ELSE 2.0 END), 0) AS carbon
+            FROM orders o JOIN items i ON i.id = o.item_id
+            WHERE o.status = 'completed'
+            GROUP BY date(o.updated_at) ORDER BY d DESC LIMIT ?
+            """,
+            (days,),
+        ).fetchall()
+        by_cat = conn.execute(
+            "SELECT category, COUNT(*) AS cnt, COALESCE(SUM(carbon_saved), 0) AS carbon FROM items GROUP BY category"
+        ).fetchall()
+        by_status = conn.execute("SELECT status, COUNT(*) AS cnt FROM items GROUP BY status").fetchall()
+    return {"trend": [dict(r) for r in reversed(rows)], "by_category": rows_to_dicts(by_cat), "by_status": rows_to_dicts(by_status)}
+
+
 @app.get("/api/rank/users")
-def rank_users(limit: int = 10) -> List[dict]:
-    """全校环保先锋榜：按个人累计减碳量排序。"""
-    conn = database.get_db()
-    rows = conn.execute(
-        """
-        SELECT u.id, u.name, u.college, u.points,
-               COALESCE(SUM(i.cycle_count), 0) AS cycles,
-               COALESCE(SUM(i.carbon_saved), 0) AS carbon_kg
-        FROM users u LEFT JOIN items i ON i.owner_id = u.id
-        GROUP BY u.id
-        ORDER BY carbon_kg DESC, cycles DESC, u.points DESC
-        LIMIT ?
-        """,
-        (limit,),
-    ).fetchall()
-    conn.close()
+def rank_users(limit: int = Query(10, ge=1, le=50)) -> List[dict]:
+    with database.db_session() as conn:
+        rows = conn.execute(
+            """
+            SELECT u.id, u.name, u.college, u.points, u.avatar,
+                   COALESCE(SUM(i.cycle_count), 0) AS cycles,
+                   COALESCE(SUM(i.carbon_saved), 0) AS carbon_kg
+            FROM users u LEFT JOIN items i ON i.owner_id = u.id
+            GROUP BY u.id ORDER BY carbon_kg DESC, cycles DESC, u.points DESC LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
     return rows_to_dicts(rows)
 
 
 @app.get("/api/rank/colleges")
 def rank_colleges() -> List[dict]:
-    """学院减碳排行大屏数据。"""
-    conn = database.get_db()
-    rows = conn.execute(
-        """
-        SELECT u.college,
-               COUNT(DISTINCT u.id) AS members,
-               COALESCE(SUM(i.cycle_count), 0) AS cycles,
-               COALESCE(SUM(i.carbon_saved), 0) AS carbon_kg
-        FROM users u LEFT JOIN items i ON i.owner_id = u.id
-        GROUP BY u.college
-        ORDER BY carbon_kg DESC
-        """
-    ).fetchall()
-    conn.close()
+    with database.db_session() as conn:
+        rows = conn.execute(
+            """
+            SELECT u.college, COUNT(DISTINCT u.id) AS members,
+                   COALESCE(SUM(i.cycle_count), 0) AS cycles,
+                   COALESCE(SUM(i.carbon_saved), 0) AS carbon_kg
+            FROM users u LEFT JOIN items i ON i.owner_id = u.id
+            GROUP BY u.college ORDER BY carbon_kg DESC
+            """
+        ).fetchall()
     data = rows_to_dicts(rows)
     top = max((d["carbon_kg"] for d in data), default=0) or 1
     for d in data:
@@ -224,8 +617,11 @@ def rank_colleges() -> List[dict]:
     return data
 
 
+# =======================================================================
+# 订单
+# =======================================================================
 ORDER_SQL = """
-    SELECT o.*, i.title AS item_title, i.price,
+    SELECT o.*, i.title AS item_title, i.category AS item_category, i.image AS item_image, i.price,
            b.name AS buyer_name, s.name AS seller_name
     FROM orders o
     JOIN items i ON i.id = o.item_id
@@ -234,166 +630,146 @@ ORDER_SQL = """
 """
 
 
-def _transition(conn, order_id: int, from_status: str, to_status: str) -> sqlite3.Row:
-    """带状态机校验的订单状态扭转。"""
+def _transition(conn, order_id: int, from_status: str, to_status: str):
     order = conn.execute("SELECT * FROM orders WHERE id = ?", (order_id,)).fetchone()
     if not order:
-        conn.close()
         raise HTTPException(status_code=404, detail="订单不存在")
     if order["status"] != from_status:
-        conn.close()
-        raise HTTPException(status_code=400, detail=f"订单状态为「{STATUS_LABEL[order['status']]}」，不能执行该操作")
+        raise HTTPException(status_code=400, detail=f"订单状态为「{STATUS_LABEL.get(order['status'], order['status'])}」，不能执行该操作")
     if to_status not in ORDER_TRANSITIONS.get(from_status, set()):
-        conn.close()
-        raise HTTPException(status_code=400, detail=f"不允许从「{STATUS_LABEL[from_status]}」流转到「{STATUS_LABEL[to_status]}」")
+        raise HTTPException(status_code=400, detail=f"不允许从「{STATUS_LABEL.get(from_status, from_status)}」流转到「{STATUS_LABEL.get(to_status, to_status)}」")
     conn.execute("UPDATE orders SET status = ?, updated_at = datetime('now','localtime') WHERE id = ?", (to_status, order_id))
     return order
 
 
 @app.get("/api/orders", response_model=List[OrderOut])
-def list_orders(user_id: int) -> List[dict]:
-    """某用户相关的订单（我是买家或我是卖家）。"""
-    conn = database.get_db()
-    rows = conn.execute(
-        ORDER_SQL + " WHERE o.buyer_id = ? OR o.seller_id = ? ORDER BY o.id DESC",
-        (user_id, user_id),
-    ).fetchall()
-    conn.close()
+def list_orders(user: dict = Depends(current_user), role: Optional[str] = Query(None, pattern="^(buy|sell)$")) -> List[dict]:
+    """本人相关订单（仅本人可见，身份取自会话）。"""
+    sql = ORDER_SQL
+    params: list = []
+    if role == "buy":
+        sql += " WHERE o.buyer_id = ?"
+        params.append(user["id"])
+    elif role == "sell":
+        sql += " WHERE o.seller_id = ?"
+        params.append(user["id"])
+    else:
+        sql += " WHERE o.buyer_id = ? OR o.seller_id = ?"
+        params += [user["id"], user["id"]]
+    sql += " ORDER BY o.id DESC"
+    with database.db_session() as conn:
+        rows = conn.execute(sql, params).fetchall()
     return rows_to_dicts(rows)
 
 
 @app.post("/api/orders", response_model=OrderOut, status_code=201)
-def create_order(payload: OrderCreate) -> dict:
-    """买家发起预约意向：物品 available -> reserved，订单进入 reserved。"""
-    conn = database.get_db()
-    item = conn.execute("SELECT * FROM items WHERE id = ?", (payload.item_id,)).fetchone()
-    if not item:
-        conn.close()
-        raise HTTPException(status_code=404, detail="物品不存在")
-    if item["owner_id"] == payload.buyer_id:
-        conn.close()
-        raise HTTPException(status_code=400, detail="不能预约自己发布的物品")
-    if item["status"] != "available":
-        conn.close()
-        raise HTTPException(status_code=400, detail="该物品当前不可预约")
-    code = f"GC-{secrets.token_hex(3).upper()}"
-    cur = conn.execute(
-        "INSERT INTO orders (item_id, buyer_id, seller_id, status, pickup_code) VALUES (?, ?, ?, 'reserved', ?)",
-        (payload.item_id, payload.buyer_id, item["owner_id"], code),
-    )
-    conn.execute("UPDATE items SET status = 'reserved' WHERE id = ?", (payload.item_id,))
-    row = conn.execute(ORDER_SQL + " WHERE o.id = ?", (cur.lastrowid,)).fetchone()
-    conn.commit()
-    conn.close()
+def create_order(payload: OrderCreate, user: dict = Depends(current_user)) -> dict:
+    """买家发起预约（买家即当前登录用户）。"""
+    with database.db_session() as conn:
+        item = conn.execute("SELECT * FROM items WHERE id = ?", (payload.item_id,)).fetchone()
+        if not item:
+            raise HTTPException(status_code=404, detail="物品不存在")
+        if item["owner_id"] == user["id"]:
+            raise HTTPException(status_code=400, detail="不能预约自己发布的物品")
+        if item["status"] != "available":
+            raise HTTPException(status_code=400, detail="该物品当前不可预约")
+        code = f"GC-{secrets.token_hex(3).upper()}"
+        cur = conn.execute(
+            "INSERT INTO orders (item_id, buyer_id, seller_id, status, pickup_code) VALUES (?, ?, ?, 'reserved', ?)",
+            (payload.item_id, user["id"], item["owner_id"], code),
+        )
+        conn.execute("UPDATE items SET status = 'reserved' WHERE id = ?", (payload.item_id,))
+        row = conn.execute(ORDER_SQL + " WHERE o.id = ?", (cur.lastrowid,)).fetchone()
     return dict(row)
 
 
 @app.post("/api/orders/{order_id}/confirm", response_model=OrderOut)
-def confirm_order(order_id: int, payload: OrderAction) -> dict:
-    """卖家确认预约意向：reserved -> confirmed（约定线下验货自提）。"""
-    conn = database.get_db()
-    order = _transition(conn, order_id, "reserved", "confirmed")
-    if payload.user_id != order["seller_id"]:
-        conn.rollback()
-        conn.close()
-        raise HTTPException(status_code=403, detail="只有卖家可以确认预约")
-    row = conn.execute(ORDER_SQL + " WHERE o.id = ?", (order_id,)).fetchone()
-    conn.commit()
-    conn.close()
+def confirm_order(order_id: int, payload: OrderAction, user: dict = Depends(current_user)) -> dict:
+    with database.db_session() as conn:
+        order = conn.execute("SELECT * FROM orders WHERE id = ?", (order_id,)).fetchone()
+        if not order:
+            raise HTTPException(status_code=404, detail="订单不存在")
+        if user["id"] != order["seller_id"]:
+            raise HTTPException(status_code=403, detail="只有卖家可以确认预约")
+        _transition(conn, order_id, "reserved", "confirmed")
+        row = conn.execute(ORDER_SQL + " WHERE o.id = ?", (order_id,)).fetchone()
     return dict(row)
 
 
 @app.post("/api/orders/{order_id}/complete", response_model=OrderOut)
-def complete_order(order_id: int, payload: OrderAction) -> dict:
-    """线下验货自提后确认完成流转：confirmed -> completed。
-    物品循环度 +1、累计减碳量增加、卖家获得碳积分奖励。"""
-    conn = database.get_db()
-    order = conn.execute("SELECT * FROM orders WHERE id = ?", (order_id,)).fetchone()
-    if not order:
-        conn.close()
-        raise HTTPException(status_code=404, detail="订单不存在")
-    if payload.user_id not in (order["buyer_id"], order["seller_id"]):
-        conn.close()
-        raise HTTPException(status_code=403, detail="只有订单参与方可以确认完成")
-    if payload.pickup_code != order["pickup_code"]:
-        conn.close()
-        raise HTTPException(status_code=400, detail="自提码不正确")
-    _transition(conn, order_id, "confirmed", "completed")
-    item = conn.execute("SELECT * FROM items WHERE id = ?", (order["item_id"],)).fetchone()
-    carbon = estimate_carbon(item["category"])
-    conn.execute(
-        "UPDATE items SET status = 'completed', cycle_count = cycle_count + 1, carbon_saved = carbon_saved + ? WHERE id = ?",
-        (carbon, order["item_id"]),
-    )
-    database.add_points(conn, order["seller_id"], REWARD_CYCLE, f"完成流转《{item['title']}》获得碳积分")
-    row = conn.execute(ORDER_SQL + " WHERE o.id = ?", (order_id,)).fetchone()
-    conn.commit()
-    conn.close()
+def complete_order(order_id: int, payload: OrderAction, user: dict = Depends(current_user)) -> dict:
+    """凭自提码完成流转（仅订单参与方）。"""
+    with database.db_session() as conn:
+        order = conn.execute("SELECT * FROM orders WHERE id = ?", (order_id,)).fetchone()
+        if not order:
+            raise HTTPException(status_code=404, detail="订单不存在")
+        if user["id"] not in (order["buyer_id"], order["seller_id"]):
+            raise HTTPException(status_code=403, detail="只有订单参与方可以确认完成")
+        if payload.pickup_code != order["pickup_code"]:
+            raise HTTPException(status_code=400, detail="自提码不正确")
+        _transition(conn, order_id, "confirmed", "completed")
+        item = conn.execute("SELECT * FROM items WHERE id = ?", (order["item_id"],)).fetchone()
+        carbon = estimate_carbon(item["category"])
+        conn.execute(
+            "UPDATE items SET status = 'completed', cycle_count = cycle_count + 1, carbon_saved = carbon_saved + ? WHERE id = ?",
+            (carbon, order["item_id"]),
+        )
+        database.add_points(conn, order["seller_id"], REWARD_CYCLE, f"完成流转《{item['title']}》获得碳积分")
+        row = conn.execute(ORDER_SQL + " WHERE o.id = ?", (order_id,)).fetchone()
     return dict(row)
 
 
 @app.post("/api/orders/{order_id}/cancel", response_model=OrderOut)
-def cancel_order(order_id: int, payload: OrderAction) -> dict:
-    """取消订单，物品回到 available。"""
-    conn = database.get_db()
-    order = conn.execute("SELECT * FROM orders WHERE id = ?", (order_id,)).fetchone()
-    if not order:
-        conn.close()
-        raise HTTPException(status_code=404, detail="订单不存在")
-    if payload.user_id not in (order["buyer_id"], order["seller_id"]):
-        conn.close()
-        raise HTTPException(status_code=403, detail="只有订单参与方可以取消")
-    _transition(conn, order_id, order["status"], "cancelled")
-    conn.execute("UPDATE items SET status = 'available' WHERE id = ?", (order["item_id"],))
-    row = conn.execute(ORDER_SQL + " WHERE o.id = ?", (order_id,)).fetchone()
-    conn.commit()
-    conn.close()
+def cancel_order(order_id: int, payload: OrderAction, user: dict = Depends(current_user)) -> dict:
+    with database.db_session() as conn:
+        order = conn.execute("SELECT * FROM orders WHERE id = ?", (order_id,)).fetchone()
+        if not order:
+            raise HTTPException(status_code=404, detail="订单不存在")
+        if user["id"] not in (order["buyer_id"], order["seller_id"]):
+            raise HTTPException(status_code=403, detail="只有订单参与方可以取消")
+        _transition(conn, order_id, order["status"], "cancelled")
+        conn.execute("UPDATE items SET status = 'available' WHERE id = ?", (order["item_id"],))
+        row = conn.execute(ORDER_SQL + " WHERE o.id = ?", (order_id,)).fetchone()
     return dict(row)
 
 
-def _require_admin(conn: sqlite3.Connection, user_id: int) -> sqlite3.Row:
-    """管理员权限校验。"""
-    user = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
-    if not user or user["role"] != "admin":
-        conn.close()
-        raise HTTPException(status_code=403, detail="需要管理员权限")
-    return user
-
-
+# =======================================================================
+# 举报
+# =======================================================================
 @app.post("/api/reports", status_code=201)
-def create_report(payload: ReportCreate) -> dict:
-    """用户举报违规物品。"""
-    conn = database.get_db()
-    item = conn.execute("SELECT * FROM items WHERE id = ?", (payload.item_id,)).fetchone()
-    if not item:
-        conn.close()
-        raise HTTPException(status_code=404, detail="物品不存在")
-    cur = conn.execute(
-        "INSERT INTO reports (item_id, reporter_id, reason) VALUES (?, ?, ?)",
-        (payload.item_id, payload.reporter_id, payload.reason),
-    )
-    row = conn.execute("SELECT * FROM reports WHERE id = ?", (cur.lastrowid,)).fetchone()
-    conn.commit()
-    conn.close()
+def create_report(payload: ReportCreate, user: dict = Depends(current_user)) -> dict:
+    with database.db_session() as conn:
+        item = conn.execute("SELECT * FROM items WHERE id = ?", (payload.item_id,)).fetchone()
+        if not item:
+            raise HTTPException(status_code=404, detail="物品不存在")
+        if item["owner_id"] == user["id"]:
+            raise HTTPException(status_code=400, detail="不能举报自己发布的物品")
+        dup = conn.execute(
+            "SELECT 1 FROM reports WHERE item_id = ? AND reporter_id = ? AND status = 'open'",
+            (payload.item_id, user["id"]),
+        ).fetchone()
+        if dup:
+            raise HTTPException(status_code=400, detail="你已举报过该物品，管理员正在处理")
+        cur = conn.execute(
+            "INSERT INTO reports (item_id, reporter_id, reason) VALUES (?, ?, ?)",
+            (payload.item_id, user["id"], payload.reason),
+        )
+        row = conn.execute("SELECT * FROM reports WHERE id = ?", (cur.lastrowid,)).fetchone()
     return dict(row)
 
 
+# =======================================================================
+# 后台管理（全部 require_admin，身份来自会话）
+# =======================================================================
 @app.get("/api/admin/summary")
-def admin_summary(user_id: int) -> dict:
-    """后台全局汇总数据卡片。"""
-    conn = database.get_db()
-    try:
-        _require_admin(conn, user_id)
+def admin_summary(admin: dict = Depends(require_admin)) -> dict:
+    with database.db_session() as conn:
         orders_by_status = {
             r["status"]: r["cnt"]
             for r in conn.execute("SELECT status, COUNT(*) AS cnt FROM orders GROUP BY status").fetchall()
         }
         open_reports = conn.execute("SELECT COUNT(*) FROM reports WHERE status = 'open'").fetchone()[0]
-        flagged_items = conn.execute(
-            "SELECT COUNT(DISTINCT item_id) FROM reports WHERE status = 'open'"
-        ).fetchone()[0]
-    finally:
-        conn.close()
+        flagged_items = conn.execute("SELECT COUNT(DISTINCT item_id) FROM reports WHERE status = 'open'").fetchone()[0]
     return {
         **stats_summary(),
         "orders_total": sum(orders_by_status.values()),
@@ -404,128 +780,163 @@ def admin_summary(user_id: int) -> dict:
     }
 
 
+ADMIN_ITEM_SQL = """
+    SELECT i.id, i.title, i.category, i.price, i.status, i.image, i.cycle_count, i.carbon_saved,
+           u.name AS owner_name,
+           (SELECT COUNT(*) FROM reports r WHERE r.item_id = i.id AND r.status = 'open') AS report_count
+    FROM items i JOIN users u ON u.id = i.owner_id
+"""
+
+
 @app.get("/api/admin/items", response_model=List[AdminItemOut])
-def admin_items(user_id: int) -> List[dict]:
-    """管理员物品清单（含已下架），并附带未处理举报数。"""
-    conn = database.get_db()
-    try:
-        _require_admin(conn, user_id)
-        rows = conn.execute(
-            """
-            SELECT i.id, i.title, i.category, i.price, i.status, i.cycle_count, i.carbon_saved,
-                   u.name AS owner_name,
-                   (SELECT COUNT(*) FROM reports r WHERE r.item_id = i.id AND r.status = 'open') AS report_count
-            FROM items i JOIN users u ON u.id = i.owner_id
-            ORDER BY report_count DESC, i.id DESC
-            """
-        ).fetchall()
-    finally:
-        conn.close()
+def admin_items(admin: dict = Depends(require_admin), status: Optional[str] = None) -> List[dict]:
+    with database.db_session() as conn:
+        sql = ADMIN_ITEM_SQL
+        params: list = []
+        if status:
+            sql += " WHERE i.status = ?"
+            params.append(status)
+        sql += " ORDER BY report_count DESC, i.id DESC"
+        rows = conn.execute(sql, params).fetchall()
     return rows_to_dicts(rows)
 
 
 @app.post("/api/admin/items/{item_id}/offshelf", response_model=AdminItemOut)
-def admin_offshelf(item_id: int, payload: UserAction) -> dict:
-    """管理员下架违规物品。"""
-    conn = database.get_db()
-    try:
-        _require_admin(conn, payload.user_id)
+def admin_offshelf(item_id: int, admin: dict = Depends(require_admin)) -> dict:
+    with database.db_session() as conn:
         item = conn.execute("SELECT * FROM items WHERE id = ?", (item_id,)).fetchone()
         if not item:
             raise HTTPException(status_code=404, detail="物品不存在")
         if item["status"] == "offshelf":
             raise HTTPException(status_code=400, detail="物品已是下架状态")
         conn.execute("UPDATE items SET status = 'offshelf' WHERE id = ?", (item_id,))
-        row = conn.execute(
-            """
-            SELECT i.*, u.name AS owner_name,
-                   (SELECT COUNT(*) FROM reports r WHERE r.item_id = i.id AND r.status = 'open') AS report_count
-            FROM items i JOIN users u ON u.id = i.owner_id WHERE i.id = ?
-            """,
-            (item_id,),
-        ).fetchone()
-        conn.commit()
-    finally:
-        conn.close()
+        row = conn.execute(ADMIN_ITEM_SQL + " WHERE i.id = ?", (item_id,)).fetchone()
     return dict(row)
 
 
 @app.post("/api/admin/items/{item_id}/restore", response_model=AdminItemOut)
-def admin_restore(item_id: int, payload: UserAction) -> dict:
-    """管理员恢复上架（仅当无进行中订单时回到 available）。"""
-    conn = database.get_db()
-    try:
-        _require_admin(conn, payload.user_id)
+def admin_restore(item_id: int, admin: dict = Depends(require_admin)) -> dict:
+    with database.db_session() as conn:
         item = conn.execute("SELECT * FROM items WHERE id = ?", (item_id,)).fetchone()
         if not item:
             raise HTTPException(status_code=404, detail="物品不存在")
         if item["status"] != "offshelf":
             raise HTTPException(status_code=400, detail="仅下架物品可恢复上架")
         conn.execute("UPDATE items SET status = 'available' WHERE id = ?", (item_id,))
-        row = conn.execute(
-            """
-            SELECT i.*, u.name AS owner_name,
-                   (SELECT COUNT(*) FROM reports r WHERE r.item_id = i.id AND r.status = 'open') AS report_count
-            FROM items i JOIN users u ON u.id = i.owner_id WHERE i.id = ?
-            """,
-            (item_id,),
-        ).fetchone()
-        conn.commit()
-    finally:
-        conn.close()
+        row = conn.execute(ADMIN_ITEM_SQL + " WHERE i.id = ?", (item_id,)).fetchone()
     return dict(row)
 
 
+REPORT_SQL = """
+    SELECT r.*, i.title AS item_title, u.name AS reporter_name
+    FROM reports r JOIN items i ON i.id = r.item_id JOIN users u ON u.id = r.reporter_id
+"""
+
+
 @app.get("/api/admin/reports", response_model=List[ReportOut])
-def admin_reports(user_id: int, status: Optional[str] = None) -> List[dict]:
-    """管理员查看举报列表。"""
-    conn = database.get_db()
-    try:
-        _require_admin(conn, user_id)
-        sql = """
-            SELECT r.*, i.title AS item_title, u.name AS reporter_name
-            FROM reports r JOIN items i ON i.id = r.item_id JOIN users u ON u.id = r.reporter_id
-        """
+def admin_reports(admin: dict = Depends(require_admin), status: Optional[str] = None) -> List[dict]:
+    with database.db_session() as conn:
+        sql = REPORT_SQL
         params: list = []
         if status:
             sql += " WHERE r.status = ?"
             params.append(status)
         sql += " ORDER BY r.id DESC"
         rows = conn.execute(sql, params).fetchall()
-    finally:
-        conn.close()
     return rows_to_dicts(rows)
 
 
 @app.post("/api/admin/reports/{report_id}/resolve", response_model=ReportOut)
-def admin_resolve_report(report_id: int, payload: UserAction) -> dict:
-    """管理员处理完结举报。"""
-    conn = database.get_db()
-    try:
-        _require_admin(conn, payload.user_id)
+def admin_resolve_report(report_id: int, admin: dict = Depends(require_admin)) -> dict:
+    with database.db_session() as conn:
         report = conn.execute("SELECT * FROM reports WHERE id = ?", (report_id,)).fetchone()
         if not report:
             raise HTTPException(status_code=404, detail="举报不存在")
         if report["status"] == "resolved":
             raise HTTPException(status_code=400, detail="该举报已处理")
         conn.execute("UPDATE reports SET status = 'resolved' WHERE id = ?", (report_id,))
-        row = conn.execute(
-            """
-            SELECT r.*, i.title AS item_title, u.name AS reporter_name
-            FROM reports r JOIN items i ON i.id = r.item_id JOIN users u ON u.id = r.reporter_id
-            WHERE r.id = ?
-            """,
-            (report_id,),
-        ).fetchone()
-        conn.commit()
-    finally:
-        conn.close()
+        row = conn.execute(REPORT_SQL + " WHERE r.id = ?", (report_id,)).fetchone()
     return dict(row)
 
 
+@app.get("/api/admin/orders", response_model=List[OrderOut])
+def admin_orders(admin: dict = Depends(require_admin), status: Optional[str] = None) -> List[dict]:
+    with database.db_session() as conn:
+        sql = ORDER_SQL
+        params: list = []
+        if status:
+            sql += " WHERE o.status = ?"
+            params.append(status)
+        sql += " ORDER BY o.id DESC LIMIT 200"
+        rows = conn.execute(sql, params).fetchall()
+    return rows_to_dicts(rows)
+
+
+@app.get("/api/admin/users")
+def admin_users(admin: dict = Depends(require_admin)) -> List[dict]:
+    with database.db_session() as conn:
+        rows = conn.execute(
+            """
+            SELECT u.id, u.name, u.student_no, u.college, u.role, u.points, u.avatar,
+                   COUNT(DISTINCT i.id) AS item_count,
+                   COALESCE(SUM(i.cycle_count), 0) AS cycles,
+                   COALESCE(SUM(i.carbon_saved), 0) AS carbon_kg
+            FROM users u LEFT JOIN items i ON i.owner_id = u.id
+            GROUP BY u.id ORDER BY carbon_kg DESC, u.id
+            """
+        ).fetchall()
+    data = rows_to_dicts(rows)
+    for d in data:
+        d["carbon_kg"] = round(d["carbon_kg"], 2)
+    return data
+
+
+@app.post("/api/admin/products", response_model=ProductOut, status_code=201)
+def admin_create_product(payload: ProductCreate, admin: dict = Depends(require_admin)) -> dict:
+    with database.db_session() as conn:
+        cur = conn.execute(
+            "INSERT INTO products (name, description, cost_points, stock, emoji) VALUES (?, ?, ?, ?, ?)",
+            (payload.name, payload.description, payload.cost_points, payload.stock, payload.emoji),
+        )
+        row = conn.execute("SELECT * FROM products WHERE id = ?", (cur.lastrowid,)).fetchone()
+    return dict(row)
+
+
+@app.patch("/api/admin/products/{product_id}", response_model=ProductOut)
+def admin_update_product(product_id: int, payload: ProductUpdate, admin: dict = Depends(require_admin)) -> dict:
+    with database.db_session() as conn:
+        product = conn.execute("SELECT * FROM products WHERE id = ?", (product_id,)).fetchone()
+        if not product:
+            raise HTTPException(status_code=404, detail="礼品不存在")
+        fields = payload.model_dump(exclude_none=True)
+        if not fields:
+            raise HTTPException(status_code=400, detail="没有需要修改的内容")
+        sets = ", ".join(f"{k} = ?" for k in fields)
+        conn.execute(f"UPDATE products SET {sets} WHERE id = ?", (*fields.values(), product_id))
+        row = conn.execute("SELECT * FROM products WHERE id = ?", (product_id,)).fetchone()
+    return dict(row)
+
+
+@app.delete("/api/admin/products/{product_id}")
+def admin_delete_product(product_id: int, admin: dict = Depends(require_admin)) -> dict:
+    with database.db_session() as conn:
+        cur = conn.execute("DELETE FROM products WHERE id = ?", (product_id,))
+        if cur.rowcount == 0:
+            raise HTTPException(status_code=404, detail="礼品不存在")
+    return {"ok": True}
+
+
+# =======================================================================
+# 静态资源与首页
+# =======================================================================
 @app.get("/")
 def index() -> FileResponse:
     return FileResponse(STATIC_DIR / "index.html")
+
+
+@app.get("/favicon.svg")
+def favicon() -> FileResponse:
+    return FileResponse(STATIC_DIR / "favicon.svg", media_type="image/svg+xml")
 
 
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
