@@ -59,7 +59,7 @@ async function reserve() {
   busy.value = true
   try {
     const o = await api.post('/api/orders', { item_id: item.value.id })
-    ui.toast(`预约成功！自提码 ${o.pickup_code}，请线下联系卖家验货`)
+    ui.toast('预约成功！自提码仅在「我买到的」中向你展示，交接后请卖家录入核销')
     await auth.refresh()
     router.push({ name: 'me', query: { tab: 'buy' } })
   } catch (e) {

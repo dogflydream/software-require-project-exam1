@@ -57,8 +57,8 @@ function orderActions(o) {
   const acts = []
   if (o.status === 'reserved' && o.seller_id === auth.user?.id)
     acts.push({ act: 'confirm', label: '确认预约', cls: 'bg-brand-600 hover:bg-brand-700 text-white' })
-  if (o.status === 'confirmed')
-    acts.push({ act: 'complete', label: '完成流转', cls: 'bg-blue-600 hover:bg-blue-700 text-white' })
+  if (o.status === 'confirmed' && o.seller_id === auth.user?.id)
+    acts.push({ act: 'complete', label: '录入自提码核销', cls: 'bg-blue-600 hover:bg-blue-700 text-white' })
   if (['reserved', 'confirmed'].includes(o.status))
     acts.push({ act: 'cancel', label: '取消订单', cls: 'bg-canvas border border-line text-muted hover:text-rose-600' })
   return acts
@@ -197,7 +197,7 @@ onMounted(loadAll)
 
         <!-- 我买到的 / 我卖出的 -->
         <div v-show="tab === 'buy' || tab === 'sell'" class="p-5">
-          <div class="mb-4 flex flex-wrap justify-between items-center gap-3"><p class="text-xs text-muted">预约 → 卖家确认 → 线下验货 → 输入自提码完成</p><select v-model="orderFilter" aria-label="订单状态筛选" class="rounded-lg border border-line bg-canvas px-3 py-2 text-xs"><option value="">全部订单</option><option value="reserved">已预约</option><option value="confirmed">待自提</option><option value="completed">已完成</option><option value="cancelled">已取消</option></select></div>
+          <div class="mb-4 flex flex-wrap justify-between items-center gap-3"><p class="text-xs text-muted">预约 → 卖家确认 → 买家验货出示码 → 卖家录入核销</p><select v-model="orderFilter" aria-label="订单状态筛选" class="rounded-lg border border-line bg-canvas px-3 py-2 text-xs"><option value="">全部订单</option><option value="reserved">已预约</option><option value="confirmed">待自提</option><option value="completed">已完成</option><option value="cancelled">已取消</option></select></div>
           <p v-if="ordersFor(tab).filter(o => !orderFilter || o.status === orderFilter).length === 0" class="py-14 text-center text-sm text-muted">
             {{ orderFilter ? '当前状态下暂无订单' : tab === 'buy' ? '还没有预约过物品' : '还没有卖出记录' }}
             <RouterLink :to="{ name: 'market' }" class="block mt-2 text-brand-600 hover:underline">去市集逛逛 →</RouterLink>
@@ -214,10 +214,14 @@ onMounted(loadAll)
                   </RouterLink>
                   <p class="mt-0.5 text-[11px] text-subtle flex flex-wrap items-center gap-x-2 gap-y-0.5">
                     <span>{{ tab === 'buy' ? '卖家 ' + o.seller_name : '买家 ' + o.buyer_name }}</span>
-                    <span class="inline-flex items-center gap-1">自提码
+                    <span v-if="o.buyer_id === auth.user?.id && o.pickup_code" class="inline-flex items-center gap-1">我的自提码
                       <code class="font-mono text-brand-700 dark:text-brand-400 bg-brand-50 dark:bg-brand-500/10 px-1.5 rounded">{{ o.pickup_code }}</code>
                     </span>
                     <span>{{ o.updated_at }}</span>
+                  </p>
+                  <p v-if="['reserved', 'confirmed'].includes(o.status)" class="mt-2 text-xs leading-relaxed text-muted">
+                    <template v-if="o.buyer_id === auth.user?.id">自提码仅你可见。{{ o.status === 'reserved' ? '请等待卖家确认预约；' : '' }}验货并完成交接后，再向卖家出示，由卖家录入核销，请勿提前透露。</template>
+                    <template v-else>自提码仅买家可见。{{ o.status === 'reserved' ? '请先确认预约，约定交接时间。' : '完成线下交接后，请买家出示自提码，再点击录入核销。' }}</template>
                   </p>
                   <!-- 线下履约需要联系对方：仅在订单处于进行中时展示对方联系方式 -->
                   <p v-if="['reserved', 'confirmed'].includes(o.status) && o.counterparty_contact"

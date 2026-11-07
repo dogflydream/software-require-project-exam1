@@ -59,7 +59,7 @@ class WorkflowRegression(unittest.TestCase):
         self.assertEqual(self.row('orders', order['id'])['status'], 'cancelled')
         self.assertEqual(self.row('items', item['id'])['status'], 'offshelf')
         with self.assertRaises(HTTPException):
-            main.complete_order(order['id'], OrderAction(pickup_code=order['pickup_code']), self.buyer)
+            main.complete_order(order['id'], OrderAction(pickup_code=order['pickup_code']), self.seller)
         main.admin_restore(item['id'], self.admin)
         new = main.create_order(OrderCreate(item_id=item['id']), self.other)
         self.assertNotEqual(new['id'], order['id'])
@@ -85,9 +85,9 @@ class WorkflowRegression(unittest.TestCase):
         main.confirm_order(order['id'], OrderAction(), self.seller)
         before = self.row('users', self.seller['id'])['points']
         with self.assertRaises(HTTPException):
-            main.complete_order(order['id'], OrderAction(pickup_code='wrong'), self.buyer)
+            main.complete_order(order['id'], OrderAction(pickup_code='wrong'), self.seller)
         self.assertEqual(self.row('orders', order['id'])['status'], 'confirmed')
-        main.complete_order(order['id'], OrderAction(pickup_code=order['pickup_code']), self.buyer)
+        main.complete_order(order['id'], OrderAction(pickup_code=order['pickup_code']), self.seller)
         with self.assertRaises(HTTPException):
             main.complete_order(order['id'], OrderAction(pickup_code=order['pickup_code']), self.seller)
         self.assertEqual(self.row('items', item['id'])['cycle_count'], 1)
@@ -116,7 +116,7 @@ class WorkflowRegression(unittest.TestCase):
                 return 200
             except HTTPException as error: return error.status_code
         with ThreadPoolExecutor(2) as pool:
-            results = list(pool.map(complete, [self.seller, self.buyer]))
+            results = list(pool.map(complete, [self.seller, self.seller]))
         self.assertCountEqual(results, [200, 400])
         self.assertEqual(self.row('users', self.seller['id'])['points'], before + 20)
         self.assertEqual(self.row('items', item['id'])['cycle_count'], 1)
@@ -128,9 +128,60 @@ class WorkflowRegression(unittest.TestCase):
             try: fn()
             except HTTPException as error: self.assertEqual(error.status_code, 400)
         with ThreadPoolExecutor(2) as pool:
-            list(pool.map(invoke, [lambda: main.complete_order(order['id'], OrderAction(pickup_code=order['pickup_code']), self.buyer), lambda: main.admin_offshelf(item['id'], self.admin)]))
+            list(pool.map(invoke, [lambda: main.complete_order(order['id'], OrderAction(pickup_code=order['pickup_code']), self.seller), lambda: main.admin_offshelf(item['id'], self.admin)]))
         pair = (self.row('orders', order['id'])['status'], self.row('items', item['id'])['status'])
         self.assertIn(pair, [('completed', 'completed'), ('cancelled', 'offshelf')])
+
+    def test_pickup_code_visible_only_to_active_order_buyer(self):
+        item, order = self.reserve()
+        self.assertTrue(order['pickup_code'])
+        def find(user):
+            return next(o for o in main.list_orders(user, None) if o['id'] == order['id'])
+        self.assertEqual(find(self.buyer)['pickup_code'], order['pickup_code'])
+        self.assertIsNone(find(self.seller)['pickup_code'])
+        confirmed = main.confirm_order(order['id'], OrderAction(), self.seller)
+        self.assertIsNone(confirmed['pickup_code'])
+        self.assertEqual(find(self.buyer)['pickup_code'], order['pickup_code'])
+        admin_order = next(o for o in main.admin_orders(self.admin, None, 200, 0) if o['id'] == order['id'])
+        self.assertIsNone(admin_order['pickup_code'])
+        # A nonparticipant has neither the order nor its credential.
+        self.assertFalse(any(o['id'] == order['id'] for o in main.list_orders(self.other, None)))
+        completed = main.complete_order(order['id'], OrderAction(pickup_code=order['pickup_code']), self.seller)
+        self.assertIsNone(completed['pickup_code'])
+        self.assertIsNone(find(self.buyer)['pickup_code'])
+        self.assertIsNone(find(self.seller)['pickup_code'])
+        second, cancelled_order = self.reserve()
+        cancelled = main.cancel_order(cancelled_order['id'], OrderAction(), self.buyer)
+        self.assertIsNone(cancelled['pickup_code'])
+
+    def test_buyer_and_admin_cannot_complete_even_with_correct_code(self):
+        item, order = self.reserve()
+        main.confirm_order(order['id'], OrderAction(), self.seller)
+        before = self.row('users', self.seller['id'])['points']
+        for user in [self.buyer, self.other, self.admin]:
+            with self.assertRaises(HTTPException) as error:
+                main.complete_order(order['id'], OrderAction(pickup_code=order['pickup_code']), user)
+            self.assertEqual(error.exception.status_code, 403)
+        self.assertEqual(self.row('orders', order['id'])['status'], 'confirmed')
+        self.assertEqual(self.row('items', item['id'])['cycle_count'], 0)
+        self.assertEqual(self.row('users', self.seller['id'])['points'], before)
+
+    def test_policy_upgrade_rotates_exposed_codes_once(self):
+        item, order = self.reserve()
+        with database.db_session() as conn:
+            conn.execute("DELETE FROM app_metadata WHERE key = 'pickup_policy'")
+            conn.execute("UPDATE orders SET pickup_code = 'GC-OLD123' WHERE id = ?", (order['id'],))
+        database.init_db()
+        rotated = self.row('orders', order['id'])['pickup_code']
+        self.assertNotEqual(rotated, 'GC-OLD123')
+        database.init_db()
+        self.assertEqual(self.row('orders', order['id'])['pickup_code'], rotated)
+        main.confirm_order(order['id'], OrderAction(), self.seller)
+        with self.assertRaises(HTTPException) as error:
+            main.complete_order(order['id'], OrderAction(pickup_code='GC-OLD123'), self.seller)
+        self.assertEqual(error.exception.status_code, 400)
+        self.assertEqual(self.row('orders', order['id'])['status'], 'confirmed')
+        main.complete_order(order['id'], OrderAction(pickup_code=rotated), self.seller)
 
     def test_redemption_receipt_is_private_and_survives_product_deletion(self):
         result = main.redeem(RedeemRequest(product_id=2), self.seller)

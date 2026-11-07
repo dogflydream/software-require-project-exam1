@@ -84,7 +84,7 @@ CREATE TABLE IF NOT EXISTS orders (
 );
 
 -- 种子数据：一条已确认待自提的订单（演示履约流程）
-INSERT INTO orders (item_id, buyer_id, seller_id, status, pickup_code) SELECT 1, 4, 2, 'confirmed', 'GC-2026-0001' WHERE NOT EXISTS (SELECT 1 FROM orders);
+INSERT INTO orders (item_id, buyer_id, seller_id, status, pickup_code) SELECT 1, 4, 2, 'confirmed', 'GC-' || upper(hex(randomblob(3))) WHERE NOT EXISTS (SELECT 1 FROM orders);
 UPDATE items SET status = 'reserved' WHERE status = 'available' AND id IN (SELECT item_id FROM orders WHERE status IN ('reserved', 'confirmed'));
 
 -- 绿循校园 数据库结构（增量 5：违规举报与后台审核）
@@ -232,3 +232,10 @@ CREATE TABLE IF NOT EXISTS redemptions (
     created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
 );
 CREATE INDEX IF NOT EXISTS idx_redemptions_user ON redemptions(user_id, id DESC);
+
+
+-- Versioned data-policy migrations; pickup credentials rotate only on policy adoption.
+CREATE TABLE IF NOT EXISTS app_metadata (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);

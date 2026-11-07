@@ -834,12 +834,15 @@ ORDER_SQL = """
 
 
 def attach_counterparty(conn, order: dict, viewer_id: Optional[int]) -> dict:
-    """为订单补充「交易对方」的联系方式，仅当查看者是订单参与方时返回。
+    """按查看者过滤订单自提码与交易对方的联系方式。
 
     线下履约需要买卖双方取得联系（约定自提时间地点），因此把对方的
     姓名与联系方式开放给对侧参与方；非参与方（含管理员）一律不返回，
     避免联系方式被无关人员读取。
     """
+    # The buyer holds the active pickup credential; sellers and admin views never receive it.
+    if viewer_id != order["buyer_id"] or order["status"] not in ("reserved", "confirmed"):
+        order["pickup_code"] = None
     order["counterparty_name"] = None
     order["counterparty_contact"] = None
     if viewer_id is None or order["status"] not in ("reserved", "confirmed"):
@@ -944,14 +947,14 @@ def confirm_order(order_id: int, payload: OrderAction, user: dict = Depends(curr
 
 @app.post("/api/orders/{order_id}/complete", response_model=OrderOut)
 def complete_order(order_id: int, payload: OrderAction, user: dict = Depends(current_user)) -> dict:
-    """凭自提码完成流转（仅订单参与方）。"""
+    """仅卖家录入买家出示的自提码完成流转。"""
     with database.db_session() as conn:
         conn.execute("BEGIN IMMEDIATE")
         order = conn.execute("SELECT * FROM orders WHERE id = ?", (order_id,)).fetchone()
         if not order:
             raise HTTPException(status_code=404, detail="订单不存在")
-        if user["id"] not in (order["buyer_id"], order["seller_id"]):
-            raise HTTPException(status_code=403, detail="只有订单参与方可以确认完成")
+        if user["id"] != order["seller_id"]:
+            raise HTTPException(status_code=403, detail="只有卖家可以录入买家出示的自提码并确认完成")
         if payload.pickup_code != order["pickup_code"]:
             raise HTTPException(status_code=400, detail="自提码不正确")
         current_item = conn.execute("SELECT status, review_status FROM items WHERE id = ?", (order["item_id"],)).fetchone()
@@ -1191,7 +1194,7 @@ def admin_orders(
         sql += " ORDER BY o.id DESC LIMIT ? OFFSET ?"
         params += [limit, offset]
         rows = conn.execute(sql, params).fetchall()
-    return rows_to_dicts(rows)
+        return [attach_counterparty(conn, dict(row), None) for row in rows]
 
 
 @app.get("/api/admin/users")

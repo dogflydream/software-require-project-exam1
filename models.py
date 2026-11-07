@@ -213,7 +213,8 @@ class OrderOut(BaseModel):
     counterparty_name: Optional[str] = None
     counterparty_contact: Optional[str] = None
     status: str
-    pickup_code: str
+    # Only the buyer receives an active order pickup credential.
+    pickup_code: Optional[str] = None
     price: float = 0
     created_at: str
     updated_at: str

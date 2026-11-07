@@ -5,6 +5,7 @@
 - ``db_session()``    —— 上下文管理器：自动提交 / 回滚 / 关闭，避免连接泄漏
 - ``init_db()``       —— 幂等建表并注入种子数据
 """
+import secrets
 import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
@@ -87,8 +88,17 @@ MIGRATIONS = [
 
 def _migrate(conn) -> None:
     """为旧库补齐新增列（SQLite 无 ADD COLUMN IF NOT EXISTS，用 PRAGMA 探测）。"""
+    conn.execute("BEGIN IMMEDIATE")
     for table, column, coltype in MIGRATIONS:
         cols = {r[1] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
         if column not in cols:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {coltype}")
 
+
+    # Invalidate credentials exposed by the former two-sided visibility policy once.
+    policy = conn.execute("SELECT value FROM app_metadata WHERE key = 'pickup_policy'").fetchone()
+    if policy is None:
+        active = conn.execute("SELECT id FROM orders WHERE status IN ('reserved', 'confirmed')").fetchall()
+        for order in active:
+            conn.execute("UPDATE orders SET pickup_code = ? WHERE id = ?", (f"GC-{secrets.token_hex(3).upper()}", order['id']))
+        conn.execute("INSERT INTO app_metadata (key, value) VALUES ('pickup_policy', 'buyer-holds-seller-verifies-v1')")

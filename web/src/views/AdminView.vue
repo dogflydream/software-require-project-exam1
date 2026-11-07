@@ -409,7 +409,7 @@ onMounted(loadAll)
           <table class="w-full text-sm min-w-[760px]">
             <thead><tr class="text-left text-[11px] uppercase tracking-wider text-subtle border-b border-line">
               <th class="py-2.5 font-medium">物品</th><th class="py-2.5 font-medium">买家</th><th class="py-2.5 font-medium">卖家</th>
-              <th class="py-2.5 font-medium">自提码</th><th class="py-2.5 font-medium">状态</th><th class="py-2.5 font-medium">更新时间</th>
+              <th class="py-2.5 font-medium">自提核验规则</th><th class="py-2.5 font-medium">状态</th><th class="py-2.5 font-medium">更新时间</th>
             </tr></thead>
             <tbody class="divide-y divide-line">
               <tr v-for="o in orders" :key="o.id" class="hover:bg-canvas/70 transition-colors">
@@ -419,7 +419,7 @@ onMounted(loadAll)
                 </td>
                 <td class="py-3 pr-3 text-muted">{{ o.buyer_name }}</td>
                 <td class="py-3 pr-3 text-muted">{{ o.seller_name }}</td>
-                <td class="py-3 pr-3"><code class="font-mono text-xs text-brand-700 dark:text-brand-400 bg-brand-50 dark:bg-brand-500/10 px-1.5 py-0.5 rounded">{{ o.pickup_code }}</code></td>
+                <td class="py-3 pr-3 text-xs text-muted">买家持码 · 卖家核销</td>
                 <td class="py-3 pr-3"><span class="px-2.5 py-1 rounded-lg text-[11px] font-semibold" :class="statusChip(o.status)">{{ statusLabel(o.status) }}</span></td>
                 <td class="py-3 text-[11px] text-subtle">{{ o.updated_at }}</td>
               </tr>
