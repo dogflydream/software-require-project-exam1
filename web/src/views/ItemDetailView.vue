@@ -1,6 +1,7 @@
 <script setup>
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useRoute, useRouter, RouterLink } from 'vue-router'
+import DialogBoundary from '@/components/DialogBoundary.vue'
 import Icon from '@/components/Icon.vue'
 import ItemImage from '@/components/ItemImage.vue'
 import Avatar from '@/components/Avatar.vue'
@@ -26,27 +27,35 @@ const showReport = ref(false)
 const reportReason = ref('')
 const reportErr = ref('')
 const reporting = ref(false)
+const loadError = ref('')
+let loadId = 0
 
 const isOwner = computed(() => auth.user && item.value && item.value.owner_id === auth.user.id)
-const canReserve = computed(() => auth.isLoggedIn && item.value && !isOwner.value && item.value.status === 'available')
+const canReserve = computed(() => item.value && !isOwner.value && item.value.status === 'available' && item.value.review_status === 'approved')
 const isPending = computed(() => item.value && item.value.review_status !== 'approved')
 const carbonFactor = computed(() => categories.factorOf(item.value?.category))
 
 async function load() {
+  const id = ++loadId
   loading.value = true
   notFound.value = false
+  loadError.value = ''
+  item.value = null
   try {
-    item.value = await api.get(`/api/items/${route.params.id}`)
+    const result = await api.get(`/api/items/${route.params.id}`)
+    if (id === loadId) item.value = result
   } catch (e) {
+    if (id !== loadId) return
     if (e.status === 404) notFound.value = true
-    else ui.toast(e.message, 'error')
+    else loadError.value = e.message
   } finally {
-    loading.value = false
+    if (id === loadId) loading.value = false
   }
 }
 
 async function reserve() {
   if (!auth.isLoggedIn) { router.push({ name: 'login', query: { redirect: route.fullPath } }); return }
+  if (busy.value) return
   busy.value = true
   try {
     const o = await api.post('/api/orders', { item_id: item.value.id })
@@ -62,6 +71,7 @@ async function reserve() {
 
 async function toggleFavorite() {
   if (!auth.isLoggedIn) { router.push({ name: 'login', query: { redirect: route.fullPath } }); return }
+  if (busy.value) return
   busy.value = true
   try {
     if (item.value.favorited) {
@@ -83,6 +93,8 @@ async function toggleFavorite() {
 }
 
 async function submitReport() {
+  if (reporting.value) return
+  reportErr.value = ''
   if (reportReason.value.length < 2) { reportErr.value = '举报理由至少 2 个字'; return }
   reporting.value = true
   try {
@@ -110,6 +122,9 @@ async function askOffshelf() {
 }
 
 onMounted(() => { categories.load(); load() })
+watch(() => route.params.id, () => { showReport.value = false; showEdit.value = false; load() })
+watch(showReport, () => { reportErr.value = '' })
+onUnmounted(() => { loadId++ })
 </script>
 
 <template>
@@ -123,6 +138,7 @@ onMounted(() => { categories.load(); load() })
       <div class="space-y-3"><div class="skel h-7 w-2/3"></div><div class="skel h-4 w-full"></div><div class="skel h-24 w-full"></div></div>
     </div>
 
+    <div v-else-if="loadError" role="alert" class="mt-5 p-8 rounded-xl2 border border-line bg-surface text-center"><p class="text-muted">{{ loadError }}</p><button type="button" @click="load" class="primary-action mt-4">重新加载详情</button></div>
     <div v-else-if="notFound" class="mt-8 grid place-items-center py-24 rounded-xl2 bg-surface border border-dashed border-line">
       <span class="grid place-items-center w-16 h-16 rounded-2xl bg-canvas text-subtle"><Icon name="box" :size="28" /></span>
       <p class="mt-4 font-semibold text-ink">物品不存在或已被移除</p>
@@ -174,7 +190,7 @@ onMounted(() => { categories.load(); load() })
         </div>
 
         <h1 class="mt-3 text-2xl font-bold text-ink leading-snug">{{ item.title }}</h1>
-        <p class="mt-2 text-3xl font-bold text-brand-700 dark:text-brand-400 tnum">¥{{ item.price.toFixed(2) }}</p>
+        <p class="mt-2 text-3xl font-bold text-brand-700 dark:text-brand-400 tnum">{{ item.price === 0 ? '免费赠送' : '¥' + item.price.toFixed(2) }}</p>
 
         <p class="mt-4 text-[14px] text-muted leading-relaxed whitespace-pre-wrap">{{ item.description || '发布者未填写描述' }}</p>
 
@@ -193,18 +209,18 @@ onMounted(() => { categories.load(); load() })
                   class="flex-1 min-w-[150px] h-11 rounded-xl bg-brand-600 hover:bg-brand-700 text-white text-sm font-semibold disabled:opacity-50 inline-flex items-center justify-center gap-2 transition-colors">
             <Icon name="handshake" :size="17" /> 发起预约意向
           </button>
-          <button v-if="auth.isLoggedIn" type="button" @click="toggleFavorite" :disabled="busy"
+          <button v-if="!isOwner && !isPending" type="button" @click="toggleFavorite" :aria-pressed="!!item.favorited" :disabled="busy"
                   class="h-11 px-4 rounded-xl border text-sm font-semibold inline-flex items-center justify-center gap-2 transition-colors"
                   :class="item.favorited ? 'border-rose-300 text-rose-500 bg-rose-50 dark:bg-rose-500/10' : 'border-line text-muted hover:text-ink hover:bg-canvas'">
             <Icon :name="item.favorited ? 'heartfill' : 'heart'" :size="17" />{{ item.favorited ? '已收藏' : '收藏' }}
           </button>
 
           <template v-if="isOwner">
-            <button type="button" @click="showEdit = true"
+            <button v-if="item.status === 'available'" type="button" @click="showEdit = true"
                     class="h-11 px-4 rounded-xl border border-line text-sm font-medium text-ink hover:bg-canvas inline-flex items-center gap-2 transition-colors">
               <Icon name="edit" :size="16" /> 编辑
             </button>
-            <button v-if="item.status !== 'offshelf' && item.status !== 'completed'" type="button" @click="askOffshelf"
+            <button v-if="item.status === 'available'" type="button" @click="askOffshelf"
                     class="h-11 px-4 rounded-xl border border-line text-sm font-medium text-muted hover:text-rose-600 hover:border-rose-300 hover:bg-rose-50 dark:hover:bg-rose-500/10 inline-flex items-center gap-2 transition-colors">
               <Icon name="archive" :size="16" /> 下架
             </button>
@@ -227,11 +243,12 @@ onMounted(() => { categories.load(); load() })
     <PublishDialog v-if="showEdit && item" :item="item" @close="showEdit = false" @saved="showEdit = false; load()" />
 
     <!-- 举报弹窗 -->
+    <Teleport to="body">
     <transition name="fade">
       <div v-if="showReport" class="fixed inset-0 z-50 bg-black/50 backdrop-blur-sm flex items-end sm:items-center justify-center p-0 sm:p-4"
            @click.self="showReport = false">
         <transition name="sheet" appear>
-          <div class="w-full sm:max-w-md bg-elevated rounded-t-2xl sm:rounded-2xl shadow-lift" role="dialog" aria-modal="true" aria-label="举报违规物品">
+          <DialogBoundary @close="showReport = false" class="w-full sm:max-w-md bg-elevated rounded-t-2xl sm:rounded-2xl shadow-lift" role="dialog" aria-modal="true" aria-label="举报违规物品">
             <div class="flex items-center justify-between px-5 py-4 border-b border-line">
               <h3 class="font-semibold text-ink">举报违规物品</h3>
               <button type="button" @click="showReport = false" aria-label="关闭"
@@ -240,7 +257,7 @@ onMounted(() => { categories.load(); load() })
             <div class="p-5">
               <p class="text-sm text-muted">举报对象：<b class="text-ink">{{ item.title }}</b></p>
               <label for="report-reason" class="block text-[13px] font-medium text-ink mt-4 mb-1.5">举报理由（2–200 字）</label>
-              <textarea id="report-reason" v-model.trim="reportReason" rows="3" maxlength="200"
+              <textarea id="report-reason" data-initial-focus v-model.trim="reportReason" rows="3" maxlength="200"
                         placeholder="请描述违规情况，例如：描述与实物不符、疑似违禁品…"
                         class="w-full px-3.5 py-2.5 rounded-xl bg-canvas border border-line text-sm text-ink placeholder:text-subtle resize-none focus:outline-none focus:ring-2 focus:ring-brand-500/40"></textarea>
               <p class="mt-1 text-right text-[11px] text-subtle tnum">{{ reportReason.length }}/200</p>
@@ -254,9 +271,10 @@ onMounted(() => { categories.load(); load() })
                 {{ reporting ? '提交中…' : '提交举报' }}
               </button>
             </div>
-          </div>
+          </DialogBoundary>
         </transition>
       </div>
     </transition>
+    </Teleport>
   </div>
 </template>

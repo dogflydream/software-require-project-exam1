@@ -31,12 +31,13 @@ function redeemLabel(p) {
 }
 
 async function redeem(p) {
+  if (busyId.value !== null) return
   if (!auth.isLoggedIn) { router.push({ name: 'login', query: { redirect: '/mall' } }); return }
   if (!(await ui.ask({ title: '兑换礼品', text: `确定使用 ${p.cost_points} 碳积分兑换「${p.name}」吗？`, ok: '确认兑换' }))) return
   busyId.value = p.id
   try {
     const r = await api.post('/api/redeem', { product_id: p.id })
-    ui.toast(r.message)
+    ui.toast(r.message + '，凭证已保存到个人中心')
     await auth.refresh()
     await load()
   } catch (e) {
@@ -56,13 +57,14 @@ onMounted(load)
         <h1 class="text-xl font-bold text-ink">碳积分商城</h1>
         <p class="mt-1 text-sm text-muted">用循环闲置赚来的碳积分，兑换校园绿色好礼</p>
       </div>
+      <div class="flex flex-wrap items-center gap-3"><RouterLink v-if="auth.isLoggedIn" to="/me?tab=gifts" class="secondary-action"><Icon name="gift" :size="16" />我的兑换记录</RouterLink>
       <div class="flex items-center gap-2 px-4 py-2.5 rounded-xl2 bg-gradient-to-br from-amber-400 to-amber-600 text-white shadow-card">
         <Icon name="coin" :size="20" />
         <span class="leading-tight">
           <span class="block text-[11px] opacity-85">我的碳积分</span>
           <span class="block text-xl font-bold tnum">{{ auth.isLoggedIn ? auth.user.points : '—' }}</span>
         </span>
-      </div>
+      </div></div>
     </div>
 
     <div v-if="loading" class="mt-5 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
@@ -71,6 +73,7 @@ onMounted(load)
       </div>
     </div>
 
+    <p v-else-if="!products.length" class="mt-5 p-10 text-center text-sm text-muted bg-surface border border-line rounded-xl2">暂无可兑换礼品，请稍后再来看看。</p>
     <div v-else class="mt-5 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
       <article v-for="p in products" :key="p.id"
                class="flex flex-col p-5 rounded-xl2 bg-surface border border-line shadow-card hover:shadow-lift transition-shadow">

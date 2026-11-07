@@ -180,6 +180,18 @@ class RedeemOut(BaseModel):
     ok: bool
     message: str
     remaining_points: int
+    redemption_id: int
+    pickup_code: str
+
+
+class RedemptionOut(BaseModel):
+    id: int
+    user_id: int
+    product_id: Optional[int] = None
+    product_name: str
+    cost_points: int
+    pickup_code: str
+    created_at: str
 
 
 # ---------- 订单 ----------

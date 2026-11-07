@@ -41,7 +41,7 @@ export const useAuthStore = defineStore('auth', () => {
 
   /** 资料或积分变动后同步最新用户对象。 */
   async function refresh() {
-    try { user.value = await api.get('/api/auth/me') } catch { /* 会话失效时保持原状 */ }
+    try { user.value = await api.get('/api/auth/me') } catch (e) { if (e.status === 401) user.value = null }
   }
 
   function setUser(u) { user.value = u }

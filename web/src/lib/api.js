@@ -34,6 +34,9 @@ async function request(path, { method = 'GET', body, isForm } = {}) {
     try { data = JSON.parse(text) } catch { data = text }
   }
   if (!res.ok) {
+    if (res.status === 401 && !['/api/auth/login', '/api/auth/register'].includes(path)) {
+      window.dispatchEvent(new Event('gc:session-expired'))
+    }
     const msg = (data && data.detail) || `请求失败（${res.status}）`
     throw new ApiError(typeof msg === 'string' ? msg : '请求参数不合法', res.status)
   }

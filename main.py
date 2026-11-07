@@ -34,12 +34,12 @@ from models import (
     AdminItemOut, AdminPasswordReset, CategoryCreate, CategoryOut, CategoryUpdate, FavoriteOut,
     Health, ItemCreate, ItemDetailOut, ItemOut, ItemUpdate, LoginRequest, OrderAction, OrderCreate,
     OrderOut, PasswordChange, PointLogOut, ProductCreate, ProductOut, ProductUpdate,
-    ProfileUpdate, RedeemOut, RedeemRequest, RegisterRequest, ReportCreate, ReportOut,
+    ProfileUpdate, RedeemOut, RedeemRequest, RedemptionOut, RegisterRequest, ReportCreate, ReportOut,
     ReviewAction, UserOut, UserPublic,
 )
 
 APP_NAME = "绿循校园"
-APP_VERSION = "2.0.0"
+APP_VERSION = "2.1.0"
 
 logger = logging.getLogger("greencampus")
 
@@ -563,6 +563,7 @@ def update_item(item_id: int, payload: ItemUpdate, user: dict = Depends(current_
     由管理员复核通过后恢复在售。
     """
     with database.db_session() as conn:
+        conn.execute("BEGIN IMMEDIATE")
         item = conn.execute("SELECT * FROM items WHERE id = ?", (item_id,)).fetchone()
         if not item:
             raise HTTPException(status_code=404, detail="物品不存在")
@@ -570,13 +571,13 @@ def update_item(item_id: int, payload: ItemUpdate, user: dict = Depends(current_
             raise HTTPException(status_code=403, detail="只能修改自己发布的物品")
         if item["status"] in ("completed", "offshelf"):
             raise HTTPException(status_code=400, detail="该物品已流转结束或已下架，不能修改")
+        if item["status"] == "reserved":
+            raise HTTPException(status_code=400, detail="物品已有进行中订单，请先协商取消订单再编辑")
         fields = payload.model_dump(exclude_none=True)
         if not fields:
             raise HTTPException(status_code=400, detail="没有需要修改的内容")
         if "category" in fields:
             require_category(conn, fields["category"])
-        if "price" in fields and item["status"] == "reserved":
-            raise HTTPException(status_code=400, detail="物品已被预约，不能修改价格")
         if "image" in fields:
             fields["image"] = save_data_url(fields["image"]) if fields["image"] else None
         # 重新提交审核：清空上次驳回理由，并记录更新时间
@@ -595,6 +596,7 @@ def update_item(item_id: int, payload: ItemUpdate, user: dict = Depends(current_
 def offshelf_own_item(item_id: int, user: dict = Depends(current_user)) -> dict:
     """物主下架自己物品（资源级授权）。"""
     with database.db_session() as conn:
+        conn.execute("BEGIN IMMEDIATE")
         item = conn.execute("SELECT * FROM items WHERE id = ?", (item_id,)).fetchone()
         if not item:
             raise HTTPException(status_code=404, detail="物品不存在")
@@ -602,11 +604,15 @@ def offshelf_own_item(item_id: int, user: dict = Depends(current_user)) -> dict:
             raise HTTPException(status_code=403, detail="只能下架自己发布的物品")
         if item["status"] == "offshelf":
             raise HTTPException(status_code=400, detail="物品已是下架状态")
+        if item["status"] == "completed":
+            raise HTTPException(status_code=400, detail="已完成流转的物品不能下架或恢复上架")
         active = conn.execute(
             "SELECT 1 FROM orders WHERE item_id = ? AND status IN ('reserved','confirmed')", (item_id,)
         ).fetchone()
         if active:
             raise HTTPException(status_code=400, detail="该物品有进行中的订单，请先取消订单")
+        if item["status"] == "reserved":
+            raise HTTPException(status_code=400, detail="物品已有进行中订单，请先取消订单再下架")
         conn.execute("UPDATE items SET status = 'offshelf' WHERE id = ?", (item_id,))
         row = conn.execute(ITEM_SQL + " WHERE i.id = ?", (item_id,)).fetchone()
     return dict(row)
@@ -676,10 +682,18 @@ def list_products() -> List[dict]:
     return rows_to_dicts(rows)
 
 
+@app.get("/api/redemptions", response_model=List[RedemptionOut])
+def my_redemptions(user: dict = Depends(current_user)) -> List[dict]:
+    with database.db_session() as conn:
+        rows = conn.execute("SELECT * FROM redemptions WHERE user_id = ? ORDER BY id DESC", (user["id"],)).fetchall()
+    return rows_to_dicts(rows)
+
+
 @app.post("/api/redeem", response_model=RedeemOut)
 def redeem(payload: RedeemRequest, user: dict = Depends(current_user)) -> RedeemOut:
     """兑换礼品（扣分与减库存同事务；扣分对象为当前登录用户）。"""
     with database.db_session() as conn:
+        conn.execute("BEGIN IMMEDIATE")
         product = conn.execute("SELECT * FROM products WHERE id = ?", (payload.product_id,)).fetchone()
         if not product:
             raise HTTPException(status_code=404, detail="礼品不存在")
@@ -699,8 +713,10 @@ def redeem(payload: RedeemRequest, user: dict = Depends(current_user)) -> Redeem
         cur = conn.execute("UPDATE products SET stock = stock - 1 WHERE id = ? AND stock > 0", (payload.product_id,))
         if cur.rowcount == 0:
             raise HTTPException(status_code=400, detail="礼品库存不足")
+        code = "GC-GIFT-" + secrets.token_hex(5).upper()
+        receipt = conn.execute("INSERT INTO redemptions (user_id, product_id, product_name, cost_points, pickup_code) VALUES (?, ?, ?, ?, ?)", (user["id"], product["id"], product["name"], product["cost_points"], code))
         remaining = conn.execute("SELECT points FROM users WHERE id = ?", (user["id"],)).fetchone()[0]
-    return RedeemOut(ok=True, message=f"成功兑换「{product['name']}」，请到学生会办公室领取", remaining_points=remaining)
+    return RedeemOut(ok=True, message=f"成功兑换「{product['name']}」，请到学生会办公室领取", remaining_points=remaining, redemption_id=receipt.lastrowid, pickup_code=code)
 
 
 # =======================================================================
@@ -826,7 +842,7 @@ def attach_counterparty(conn, order: dict, viewer_id: Optional[int]) -> dict:
     """
     order["counterparty_name"] = None
     order["counterparty_contact"] = None
-    if viewer_id is None:
+    if viewer_id is None or order["status"] not in ("reserved", "confirmed"):
         return order
     if viewer_id == order["buyer_id"]:
         other_id = order["seller_id"]
@@ -849,7 +865,9 @@ def _transition(conn, order_id: int, from_status: str, to_status: str):
         raise HTTPException(status_code=400, detail=f"订单状态为「{STATUS_LABEL.get(order['status'], order['status'])}」，不能执行该操作")
     if to_status not in ORDER_TRANSITIONS.get(from_status, set()):
         raise HTTPException(status_code=400, detail=f"不允许从「{STATUS_LABEL.get(from_status, from_status)}」流转到「{STATUS_LABEL.get(to_status, to_status)}」")
-    conn.execute("UPDATE orders SET status = ?, updated_at = datetime('now','localtime') WHERE id = ?", (to_status, order_id))
+    changed = conn.execute("UPDATE orders SET status = ?, updated_at = datetime('now','localtime') WHERE id = ? AND status = ?", (to_status, order_id, from_status))
+    if changed.rowcount != 1:
+        raise HTTPException(status_code=400, detail="订单状态已变化，请刷新后重试")
     return order
 
 
@@ -883,6 +901,7 @@ def create_order(payload: OrderCreate, user: dict = Depends(current_user)) -> di
     避免 check-then-act 竞态导致的重复订单（超卖）。
     """
     with database.db_session() as conn:
+        conn.execute("BEGIN IMMEDIATE")
         item = conn.execute("SELECT * FROM items WHERE id = ?", (payload.item_id,)).fetchone()
         if not item:
             raise HTTPException(status_code=404, detail="物品不存在")
@@ -892,7 +911,7 @@ def create_order(payload: OrderCreate, user: dict = Depends(current_user)) -> di
             raise HTTPException(status_code=400, detail="该物品尚未通过审核，暂不可预约")
         # 原子抢占：仅当仍为 available 时置为 reserved
         claimed = conn.execute(
-            "UPDATE items SET status = 'reserved' WHERE id = ? AND status = 'available'",
+            "UPDATE items SET status = 'reserved' WHERE id = ? AND status = 'available' AND review_status = 'approved'",
             (payload.item_id,),
         )
         if claimed.rowcount == 0:
@@ -909,11 +928,15 @@ def create_order(payload: OrderCreate, user: dict = Depends(current_user)) -> di
 @app.post("/api/orders/{order_id}/confirm", response_model=OrderOut)
 def confirm_order(order_id: int, payload: OrderAction, user: dict = Depends(current_user)) -> dict:
     with database.db_session() as conn:
+        conn.execute("BEGIN IMMEDIATE")
         order = conn.execute("SELECT * FROM orders WHERE id = ?", (order_id,)).fetchone()
         if not order:
             raise HTTPException(status_code=404, detail="订单不存在")
         if user["id"] != order["seller_id"]:
             raise HTTPException(status_code=403, detail="只有卖家可以确认预约")
+        current_item = conn.execute("SELECT status, review_status FROM items WHERE id = ?", (order["item_id"],)).fetchone()
+        if current_item["status"] != "reserved" or current_item["review_status"] != "approved":
+            raise HTTPException(status_code=400, detail="物品已下架或未通过审核，请取消订单或联系管理员")
         _transition(conn, order_id, "reserved", "confirmed")
         row = conn.execute(ORDER_SQL + " WHERE o.id = ?", (order_id,)).fetchone()
         return attach_counterparty(conn, dict(row), user["id"])
@@ -923,6 +946,7 @@ def confirm_order(order_id: int, payload: OrderAction, user: dict = Depends(curr
 def complete_order(order_id: int, payload: OrderAction, user: dict = Depends(current_user)) -> dict:
     """凭自提码完成流转（仅订单参与方）。"""
     with database.db_session() as conn:
+        conn.execute("BEGIN IMMEDIATE")
         order = conn.execute("SELECT * FROM orders WHERE id = ?", (order_id,)).fetchone()
         if not order:
             raise HTTPException(status_code=404, detail="订单不存在")
@@ -930,6 +954,9 @@ def complete_order(order_id: int, payload: OrderAction, user: dict = Depends(cur
             raise HTTPException(status_code=403, detail="只有订单参与方可以确认完成")
         if payload.pickup_code != order["pickup_code"]:
             raise HTTPException(status_code=400, detail="自提码不正确")
+        current_item = conn.execute("SELECT status, review_status FROM items WHERE id = ?", (order["item_id"],)).fetchone()
+        if current_item["status"] != "reserved" or current_item["review_status"] != "approved":
+            raise HTTPException(status_code=400, detail="物品已下架或未通过审核，请取消订单或联系管理员")
         _transition(conn, order_id, "confirmed", "completed")
         item = conn.execute("SELECT * FROM items WHERE id = ?", (order["item_id"],)).fetchone()
         carbon = estimate_carbon(item["category"])
@@ -945,13 +972,14 @@ def complete_order(order_id: int, payload: OrderAction, user: dict = Depends(cur
 @app.post("/api/orders/{order_id}/cancel", response_model=OrderOut)
 def cancel_order(order_id: int, payload: OrderAction, user: dict = Depends(current_user)) -> dict:
     with database.db_session() as conn:
+        conn.execute("BEGIN IMMEDIATE")
         order = conn.execute("SELECT * FROM orders WHERE id = ?", (order_id,)).fetchone()
         if not order:
             raise HTTPException(status_code=404, detail="订单不存在")
         if user["id"] not in (order["buyer_id"], order["seller_id"]):
             raise HTTPException(status_code=403, detail="只有订单参与方可以取消")
         _transition(conn, order_id, order["status"], "cancelled")
-        conn.execute("UPDATE items SET status = 'available' WHERE id = ?", (order["item_id"],))
+        conn.execute("UPDATE items SET status = 'available' WHERE id = ? AND status = 'reserved'", (order["item_id"],))
         row = conn.execute(ORDER_SQL + " WHERE o.id = ?", (order_id,)).fetchone()
         return attach_counterparty(conn, dict(row), user["id"])
 
@@ -1060,6 +1088,7 @@ def admin_items(
 def admin_review_item(item_id: int, payload: ReviewAction, admin: dict = Depends(require_admin)) -> dict:
     """审核物品：通过后进入市集在售；驳回需给出理由，物品不再对外展示。"""
     with database.db_session() as conn:
+        conn.execute("BEGIN IMMEDIATE")
         item = conn.execute("SELECT * FROM items WHERE id = ?", (item_id,)).fetchone()
         if not item:
             raise HTTPException(status_code=404, detail="物品不存在")
@@ -1067,6 +1096,9 @@ def admin_review_item(item_id: int, payload: ReviewAction, admin: dict = Depends
             raise HTTPException(status_code=400, detail="该物品已是审核通过状态")
         if not payload.approve and not (payload.note or "").strip():
             raise HTTPException(status_code=400, detail="驳回时必须填写理由")
+        if not payload.approve:
+            conn.execute("UPDATE orders SET status = 'cancelled', updated_at = datetime('now','localtime') WHERE item_id = ? AND status IN ('reserved', 'confirmed')", (item_id,))
+            conn.execute("UPDATE items SET status = 'available' WHERE id = ? AND status = 'reserved'", (item_id,))
         new_status = "approved" if payload.approve else "rejected"
         conn.execute(
             """UPDATE items SET review_status = ?, review_note = ?,
@@ -1080,11 +1112,15 @@ def admin_review_item(item_id: int, payload: ReviewAction, admin: dict = Depends
 @app.post("/api/admin/items/{item_id}/offshelf", response_model=AdminItemOut)
 def admin_offshelf(item_id: int, admin: dict = Depends(require_admin)) -> dict:
     with database.db_session() as conn:
+        conn.execute("BEGIN IMMEDIATE")
         item = conn.execute("SELECT * FROM items WHERE id = ?", (item_id,)).fetchone()
         if not item:
             raise HTTPException(status_code=404, detail="物品不存在")
         if item["status"] == "offshelf":
             raise HTTPException(status_code=400, detail="物品已是下架状态")
+        if item["status"] == "completed":
+            raise HTTPException(status_code=400, detail="已完成流转的物品不能下架或恢复上架")
+        conn.execute("UPDATE orders SET status = 'cancelled', updated_at = datetime('now','localtime') WHERE item_id = ? AND status IN ('reserved', 'confirmed')", (item_id,))
         conn.execute(
             "UPDATE items SET status = 'offshelf', updated_at = datetime('now','localtime') WHERE id = ?",
             (item_id,),
@@ -1097,6 +1133,7 @@ def admin_offshelf(item_id: int, admin: dict = Depends(require_admin)) -> dict:
 def admin_restore(item_id: int, admin: dict = Depends(require_admin)) -> dict:
     """恢复上架：未通过审核的物品恢复后仍不可见，需先审核通过。"""
     with database.db_session() as conn:
+        conn.execute("BEGIN IMMEDIATE")
         item = conn.execute("SELECT * FROM items WHERE id = ?", (item_id,)).fetchone()
         if not item:
             raise HTTPException(status_code=404, detail="物品不存在")

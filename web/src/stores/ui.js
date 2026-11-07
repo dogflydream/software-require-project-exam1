@@ -27,6 +27,7 @@ export const useUiStore = defineStore('ui', () => {
 
   /** 返回 Promise，确认时 resolve(true)，取消 resolve(false)。 */
   function ask({ title, text, ok = '确认', danger = false }) {
+    if (confirm.value) resolveConfirm(false)
     return new Promise((resolve) => {
       confirm.value = { title, text, ok, danger, resolve }
     })

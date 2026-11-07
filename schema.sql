@@ -84,8 +84,8 @@ CREATE TABLE IF NOT EXISTS orders (
 );
 
 -- 种子数据：一条已确认待自提的订单（演示履约流程）
-UPDATE items SET status = 'reserved' WHERE title = '《数据结构（C语言版）》严蔚敏' AND status = 'available';
 INSERT INTO orders (item_id, buyer_id, seller_id, status, pickup_code) SELECT 1, 4, 2, 'confirmed', 'GC-2026-0001' WHERE NOT EXISTS (SELECT 1 FROM orders);
+UPDATE items SET status = 'reserved' WHERE status = 'available' AND id IN (SELECT item_id FROM orders WHERE status IN ('reserved', 'confirmed'));
 
 -- 绿循校园 数据库结构（增量 5：违规举报与后台审核）
 CREATE TABLE IF NOT EXISTS reports (
@@ -219,3 +219,16 @@ CREATE TABLE IF NOT EXISTS login_attempts (
     locked_until TEXT,                             -- 锁定截止时间，为空表示未锁定
     last_fail_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
 );
+
+
+-- Persistent gift redemption receipts. Keep snapshots after a product is deleted.
+CREATE TABLE IF NOT EXISTS redemptions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL REFERENCES users(id),
+    product_id INTEGER REFERENCES products(id) ON DELETE SET NULL,
+    product_name TEXT NOT NULL,
+    cost_points INTEGER NOT NULL CHECK (cost_points > 0),
+    pickup_code TEXT NOT NULL UNIQUE,
+    created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+);
+CREATE INDEX IF NOT EXISTS idx_redemptions_user ON redemptions(user_id, id DESC);

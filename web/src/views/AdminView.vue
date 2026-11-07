@@ -1,6 +1,7 @@
 <script setup>
 import { ref, computed, onMounted } from 'vue'
 import { RouterLink, useRouter } from 'vue-router'
+import DialogBoundary from '@/components/DialogBoundary.vue'
 import Icon from '@/components/Icon.vue'
 import Avatar from '@/components/Avatar.vue'
 import ItemImage from '@/components/ItemImage.vue'
@@ -129,7 +130,7 @@ async function loadReports() {
 
 async function itemAction(it, act) {
   const label = act === 'offshelf' ? '下架' : '恢复上架'
-  if (!(await ui.ask({ title: `${label}物品`, text: `确定要${label}《${it.title}》吗？`, ok: `确认${label}`, danger: act === 'offshelf' }))) return
+  if (!(await ui.ask({ title: `${label}物品`, text: `确定要${label}《${it.title}》吗？${act === 'offshelf' ? '下架将同时取消该物品的进行中订单。' : ''}`, ok: `确认${label}`, danger: act === 'offshelf' }))) return
   try {
     await api.post(`/api/admin/items/${it.id}/${act}`, {})
     ui.toast(`物品已${label}`)
@@ -139,7 +140,7 @@ async function itemAction(it, act) {
 
 /** 审核通过 */
 async function approveItem(it) {
-  if (!(await ui.ask({ title: '审核通过', text: `确认通过《${it.title}》的审核？通过后将在市集展示。`, ok: '审核通过' }))) return
+  if (!(await ui.ask({ title: '审核通过', text: `确认通过《${it.title}》的审核？在售物品将恢复展示，已下架物品还需单独恢复上架。`, ok: '审核通过' }))) return
   try {
     await api.post(`/api/admin/items/${it.id}/review`, { approve: true })
     ui.toast('已审核通过')
@@ -282,8 +283,8 @@ onMounted(loadAll)
     </div>
 
     <div class="mt-4 rounded-xl2 bg-surface border border-line shadow-card overflow-hidden">
-      <div class="flex gap-1 p-2 border-b border-line overflow-x-auto no-bar" role="tablist">
-        <button v-for="t in tabs" :key="t.key" type="button" role="tab" :aria-selected="tab === t.key" @click="tab = t.key"
+      <div class="flex gap-1 p-2 border-b border-line overflow-x-auto no-bar" role="group" aria-label="后台管理分栏">
+        <button v-for="t in tabs" :key="t.key" type="button" :aria-pressed="tab === t.key" @click="tab = t.key"
                 class="px-3.5 py-2 rounded-lg text-sm font-medium whitespace-nowrap transition-colors inline-flex items-center gap-2"
                 :class="tab === t.key ? 'bg-brand-50 dark:bg-brand-500/15 text-brand-700 dark:text-brand-300' : 'text-muted hover:text-ink hover:bg-canvas'">
           <Icon :name="t.icon" :size="16" />{{ t.label }}
@@ -556,11 +557,12 @@ onMounted(loadAll)
     </div>
 
     <!-- 礼品表单 -->
+    <Teleport to="body">
     <transition name="fade">
       <div v-if="showProductForm" class="fixed inset-0 z-50 bg-black/50 backdrop-blur-sm flex items-end sm:items-center justify-center p-0 sm:p-4"
            @click.self="showProductForm = false">
         <transition name="sheet" appear>
-          <div class="w-full sm:max-w-md bg-elevated rounded-t-2xl sm:rounded-2xl shadow-lift" role="dialog" aria-modal="true">
+          <DialogBoundary @close="showProductForm = false" aria-label="礼品管理" class="w-full sm:max-w-md bg-elevated rounded-t-2xl sm:rounded-2xl shadow-lift" role="dialog" aria-modal="true">
             <div class="flex items-center justify-between px-5 py-4 border-b border-line">
               <h3 class="font-semibold text-ink">{{ pForm.id ? '编辑礼品' : '新增礼品' }}</h3>
               <button type="button" @click="showProductForm = false" aria-label="关闭"
@@ -574,7 +576,7 @@ onMounted(loadAll)
                 </div>
                 <div>
                   <label for="pr-name" class="block text-[13px] font-medium text-ink mb-1.5">礼品名称 <span class="text-rose-500">*</span></label>
-                  <input id="pr-name" v-model.trim="pForm.name" maxlength="40" placeholder="例如：定制帆布袋"
+                  <input id="pr-name" data-initial-focus v-model.trim="pForm.name" maxlength="40" placeholder="例如：定制帆布袋"
                          class="w-full h-11 px-3.5 rounded-xl bg-canvas border border-line text-sm text-ink placeholder:text-subtle focus:outline-none focus:ring-2 focus:ring-brand-500/40" />
                 </div>
               </div>
@@ -600,17 +602,19 @@ onMounted(loadAll)
               <button type="button" @click="submitProduct" :disabled="savingProduct"
                       class="h-10 px-5 rounded-xl bg-brand-600 hover:bg-brand-700 text-white text-sm font-semibold disabled:opacity-50 transition-colors">{{ savingProduct ? '保存中…' : '保存' }}</button>
             </div>
-          </div>
+          </DialogBoundary>
         </transition>
       </div>
     </transition>
+    </Teleport>
 
     <!-- 分类表单 -->
+    <Teleport to="body">
     <transition name="fade">
       <div v-if="showCategoryForm" class="fixed inset-0 z-50 bg-black/50 backdrop-blur-sm flex items-end sm:items-center justify-center p-0 sm:p-4"
            @click.self="showCategoryForm = false">
         <transition name="sheet" appear>
-          <div class="w-full sm:max-w-md bg-elevated rounded-t-2xl sm:rounded-2xl shadow-lift" role="dialog" aria-modal="true">
+          <DialogBoundary @close="showCategoryForm = false" aria-label="分类管理" class="w-full sm:max-w-md bg-elevated rounded-t-2xl sm:rounded-2xl shadow-lift" role="dialog" aria-modal="true">
             <div class="flex items-center justify-between px-5 py-4 border-b border-line">
               <h3 class="font-semibold text-ink">{{ cForm.id ? '编辑分类' : '新增分类' }}</h3>
               <button type="button" @click="showCategoryForm = false" aria-label="关闭"
@@ -619,7 +623,7 @@ onMounted(loadAll)
             <div class="p-5 space-y-4">
               <div>
                 <label for="cf-name" class="block text-[13px] font-medium text-ink mb-1.5">分类名称 <span class="text-rose-500">*</span></label>
-                <input id="cf-name" v-model.trim="cForm.name" maxlength="10" placeholder="例如：数码产品"
+                <input id="cf-name" data-initial-focus v-model.trim="cForm.name" maxlength="10" placeholder="例如：数码产品"
                        class="w-full h-11 px-3.5 rounded-xl bg-canvas border border-line text-sm text-ink placeholder:text-subtle focus:outline-none focus:ring-2 focus:ring-brand-500/40" />
                 <p class="mt-1 text-[11px] text-subtle">重命名分类会同步更新属于该分类的物品</p>
               </div>
@@ -653,17 +657,19 @@ onMounted(loadAll)
               <button type="button" @click="submitCategory" :disabled="savingCategory"
                       class="h-10 px-5 rounded-xl bg-brand-600 hover:bg-brand-700 text-white text-sm font-semibold disabled:opacity-50 transition-colors">{{ savingCategory ? '保存中…' : '保存' }}</button>
             </div>
-          </div>
+          </DialogBoundary>
         </transition>
       </div>
     </transition>
+    </Teleport>
 
     <!-- 驳回理由 -->
+    <Teleport to="body">
     <transition name="fade">
       <div v-if="rejectTarget" class="fixed inset-0 z-50 bg-black/50 backdrop-blur-sm flex items-end sm:items-center justify-center p-0 sm:p-4"
            @click.self="rejectTarget = null">
         <transition name="sheet" appear>
-          <div class="w-full sm:max-w-md bg-elevated rounded-t-2xl sm:rounded-2xl shadow-lift" role="dialog" aria-modal="true">
+          <DialogBoundary @close="rejectTarget = null" aria-label="驳回物品" class="w-full sm:max-w-md bg-elevated rounded-t-2xl sm:rounded-2xl shadow-lift" role="dialog" aria-modal="true">
             <div class="flex items-center justify-between px-5 py-4 border-b border-line">
               <h3 class="font-semibold text-ink">驳回物品</h3>
               <button type="button" @click="rejectTarget = null" aria-label="关闭"
@@ -672,7 +678,7 @@ onMounted(loadAll)
             <div class="p-5">
               <p class="text-sm text-muted">驳回对象：<b class="text-ink">{{ rejectTarget.title }}</b></p>
               <label for="reject-note" class="block text-[13px] font-medium text-ink mt-4 mb-1.5">驳回理由（2–200 字，将展示给发布者）</label>
-              <textarea id="reject-note" v-model.trim="rejectNote" rows="3" maxlength="200"
+              <textarea id="reject-note" data-initial-focus v-model.trim="rejectNote" rows="3" maxlength="200"
                         placeholder="例如：图片与描述不符，请补充实物照片后重新提交"
                         class="w-full px-3.5 py-2.5 rounded-xl bg-canvas border border-line text-sm text-ink placeholder:text-subtle resize-none focus:outline-none focus:ring-2 focus:ring-brand-500/40"></textarea>
               <p class="mt-1 text-right text-[11px] text-subtle tnum">{{ rejectNote.length }}/200</p>
@@ -683,17 +689,19 @@ onMounted(loadAll)
               <button type="button" @click="submitReject"
                       class="h-10 px-5 rounded-xl bg-red-600 hover:bg-red-700 text-white text-sm font-semibold transition-colors">确认驳回</button>
             </div>
-          </div>
+          </DialogBoundary>
         </transition>
       </div>
     </transition>
+    </Teleport>
 
     <!-- 重置密码 -->
+    <Teleport to="body">
     <transition name="fade">
       <div v-if="resetTarget" class="fixed inset-0 z-50 bg-black/50 backdrop-blur-sm flex items-end sm:items-center justify-center p-0 sm:p-4"
            @click.self="resetTarget = null">
         <transition name="sheet" appear>
-          <div class="w-full sm:max-w-md bg-elevated rounded-t-2xl sm:rounded-2xl shadow-lift" role="dialog" aria-modal="true">
+          <DialogBoundary @close="resetTarget = null" aria-label="重置用户密码" class="w-full sm:max-w-md bg-elevated rounded-t-2xl sm:rounded-2xl shadow-lift" role="dialog" aria-modal="true">
             <div class="flex items-center justify-between px-5 py-4 border-b border-line">
               <h3 class="font-semibold text-ink">重置用户密码</h3>
               <button type="button" @click="resetTarget = null" aria-label="关闭"
@@ -707,7 +715,7 @@ onMounted(loadAll)
                 重置后该用户的全部登录会话将失效、登录锁定一并解除，请将新密码告知本人。
               </p>
               <label for="reset-pwd" class="block text-[13px] font-medium text-ink mt-4 mb-1.5">新密码（至少 6 位）</label>
-              <input id="reset-pwd" v-model="resetPwd" type="text" maxlength="64" placeholder="输入新密码"
+              <input id="reset-pwd" data-initial-focus v-model="resetPwd" type="text" maxlength="64" placeholder="输入新密码"
                      class="w-full h-11 px-3.5 rounded-xl bg-canvas border border-line text-sm text-ink placeholder:text-subtle focus:outline-none focus:ring-2 focus:ring-brand-500/40" />
               <p v-if="resetErr" class="mt-1 text-[12px] text-rose-500">{{ resetErr }}</p>
             </div>
@@ -716,9 +724,10 @@ onMounted(loadAll)
               <button type="button" @click="submitResetPwd" :disabled="resetting"
                       class="h-10 px-5 rounded-xl bg-brand-600 hover:bg-brand-700 text-white text-sm font-semibold disabled:opacity-50 transition-colors">{{ resetting ? '重置中…' : '确认重置' }}</button>
             </div>
-          </div>
+          </DialogBoundary>
         </transition>
       </div>
     </transition>
+    </Teleport>
   </div>
 </template>

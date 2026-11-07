@@ -4,18 +4,20 @@ import { useRoute, useRouter, RouterLink } from 'vue-router'
 import Icon from '@/components/Icon.vue'
 import Avatar from '@/components/Avatar.vue'
 import ItemImage from '@/components/ItemImage.vue'
+import FulfillDialog from '@/components/FulfillDialog.vue'
 import PublishDialog from '@/components/PublishDialog.vue'
 import { api } from '@/lib/api'
 import { useAuthStore } from '@/stores/auth'
 import { useUiStore } from '@/stores/ui'
-import { itemStatusChip, itemStatusLabel, statusChip, statusLabel, catBg, catFg, catIcon, isGain } from '@/lib/format'
+import { itemStatusChip, itemStatusLabel, statusChip, statusLabel, catBg, catFg, catIcon, isGain, reviewChip, reviewLabel } from '@/lib/format'
 
 const auth = useAuthStore()
 const ui = useUiStore()
 const route = useRoute()
 const router = useRouter()
 
-const tab = ref(route.query.tab || 'points')
+const validTabs = ['points', 'buy', 'sell', 'items', 'fav', 'reports', 'gifts']
+const tab = ref(validTabs.includes(route.query.tab) ? route.query.tab : 'points')
 const summary = ref({})
 const pointLogs = ref([])
 const orders = ref([])
@@ -24,8 +26,14 @@ const favorites = ref([])
 const myReports = ref([])
 const loading = ref(true)
 const editItem = ref(null)
+const completing = ref(null)
+const busyOrder = ref(null)
+const orderFilter = ref('')
+const loadError = ref('')
+const redemptions = ref([])
 
 const tabs = computed(() => [
+  { key: 'gifts', label: '兑换记录', icon: 'gift', count: redemptions.value.length },
   { key: 'points', label: '积分流水', icon: 'coin' },
   { key: 'buy', label: '我买到的', icon: 'cart', count: ordersFor('buy').length },
   { key: 'sell', label: '我卖出的', icon: 'handshake', count: ordersFor('sell').length },
@@ -57,18 +65,20 @@ function orderActions(o) {
 }
 
 async function doOrderAction(o, act) {
+  if (busyOrder.value !== null) return
+  if (act === 'complete') { completing.value = o; return }
   if (act === 'cancel') {
     if (!(await ui.ask({ title: '取消订单', text: `确定取消《${o.item_title}》的订单吗？物品将重新上架。`, ok: '确认取消', danger: true }))) return
   }
+  busyOrder.value = o.id
   try {
-    await api.post(`/api/orders/${o.id}/${act}`, act === 'complete' ? { pickup_code: o.pickup_code } : {})
-    ui.toast(act === 'complete' ? '流转完成！循环度 +1，卖家获得 20 碳积分'
-      : act === 'confirm' ? '已确认预约，请与买家约定自提' : '订单已取消')
+    await api.post(`/api/orders/${o.id}/${act}`, {})
+    ui.toast(act === 'confirm' ? '已确认预约，请与买家约定自提' : '订单已取消')
     await loadAll()
     await auth.refresh()
   } catch (e) {
     ui.toast(e.message, 'error')
-  }
+  } finally { busyOrder.value = null }
 }
 
 async function removeFavorite(f) {
@@ -91,23 +101,23 @@ async function askOffshelf(it) {
 
 async function loadAll() {
   loading.value = true
+  loadError.value = ''
   try {
-    const [s, logs, ords, mine, favs, reps] = await Promise.all([
+    const [s, logs, ords, mine, favs, reps, gifts] = await Promise.all([
       api.get('/api/me/summary'), api.get('/api/point-logs'),
       api.get('/api/orders'), api.get('/api/items/mine'), api.get('/api/favorites'),
-      api.get('/api/reports/mine'),
+      api.get('/api/reports/mine'), api.get('/api/redemptions'),
     ])
     summary.value = s; pointLogs.value = logs; orders.value = ords
-    myItems.value = mine; favorites.value = favs; myReports.value = reps
+    myItems.value = mine; favorites.value = favs; myReports.value = reps; redemptions.value = gifts
   } catch (e) {
-    if (e.status === 401) router.push({ name: 'login' })
-    else ui.toast(e.message, 'error')
+    if (e.status !== 401) loadError.value = e.message
   } finally {
     loading.value = false
   }
 }
 
-watch(() => route.query.tab, (t) => { if (t) tab.value = t })
+watch(() => route.query.tab, (t) => { tab.value = validTabs.includes(t) ? t : 'points' })
 watch(tab, (t) => router.replace({ name: 'me', query: { tab: t } }))
 onMounted(loadAll)
 </script>
@@ -119,7 +129,8 @@ onMounted(loadAll)
       <div class="skel h-64 rounded-xl2"></div>
     </div>
 
-    <template v-else>
+    <div v-else-if="loadError" role="alert" class="p-8 rounded-xl2 border border-line bg-surface text-center"><p class="text-muted">{{ loadError }}</p><button type="button" @click="loadAll" class="primary-action mt-4">重新加载个人中心</button></div>
+    <template v-else-if="auth.user">
       <!-- 资料卡 -->
       <div class="p-6 rounded-xl2 bg-gradient-to-br from-brand-600 to-emerald-800 text-white shadow-card">
         <div class="flex flex-wrap items-center gap-5">
@@ -151,8 +162,8 @@ onMounted(loadAll)
 
       <!-- 分栏 -->
       <div class="mt-4 rounded-xl2 bg-surface border border-line shadow-card overflow-hidden">
-        <div class="flex gap-1 p-2 border-b border-line overflow-x-auto no-bar" role="tablist">
-          <button v-for="t in tabs" :key="t.key" type="button" role="tab" :aria-selected="tab === t.key" @click="tab = t.key"
+        <div class="flex gap-1 p-2 border-b border-line overflow-x-auto no-bar" role="group" aria-label="个人中心分栏">
+          <button v-for="t in tabs" :key="t.key" type="button" :aria-pressed="tab === t.key" @click="tab = t.key"
                   class="px-3.5 py-2 rounded-lg text-sm font-medium whitespace-nowrap transition-colors inline-flex items-center gap-2"
                   :class="tab === t.key ? 'bg-brand-50 dark:bg-brand-500/15 text-brand-700 dark:text-brand-300' : 'text-muted hover:text-ink hover:bg-canvas'">
             <Icon :name="t.icon" :size="16" />{{ t.label }}
@@ -160,6 +171,12 @@ onMounted(loadAll)
           </button>
         </div>
 
+        <div v-show="tab === 'gifts'" class="p-5">
+          <div class="mb-4 flex flex-wrap justify-between gap-2"><div><h2 class="font-semibold text-ink">我的绿色好礼</h2><p class="mt-1 text-xs text-muted">请凭兑换凭证到学生会办公室领取；兑换后积分已扣除。</p></div><RouterLink to="/mall" class="text-sm text-brand-700 dark:text-brand-300 hover:underline">去积分商城 →</RouterLink></div>
+          <p v-if="!redemptions.length" class="py-14 text-center text-sm text-muted">暂无兑换记录，参与闲置流转赚取积分后可兑换礼品。</p>
+          <ul v-else class="space-y-3"><li v-for="gift in redemptions" :key="gift.id" class="rounded-xl border border-line bg-canvas p-4"><div class="flex justify-between gap-3"><h3 class="font-semibold text-sm">{{ gift.product_name }}</h3><span class="text-sm text-amber-700 dark:text-amber-300">−{{ gift.cost_points }} 积分</span></div><p class="mt-2 text-xs text-muted">兑换凭证 <code class="text-ink break-all">{{ gift.pickup_code }}</code></p><p class="mt-1 text-xs text-muted">{{ gift.created_at }} · 领取地点：学生会办公室</p></li></ul>
+          <p class="mt-4 text-xs text-muted">新增凭证仅涵盖本次升级后的兑换；历史兑换仍可在积分流水中查看。</p>
+        </div>
         <!-- 积分流水 -->
         <div v-show="tab === 'points'" class="p-5">
           <p v-if="pointLogs.length === 0" class="py-14 text-center text-sm text-muted">暂无积分记录，发布一件闲置即可获得 10 碳积分</p>
@@ -180,12 +197,13 @@ onMounted(loadAll)
 
         <!-- 我买到的 / 我卖出的 -->
         <div v-show="tab === 'buy' || tab === 'sell'" class="p-5">
-          <p v-if="ordersFor(tab).length === 0" class="py-14 text-center text-sm text-muted">
-            {{ tab === 'buy' ? '还没有预约过物品' : '还没有卖出记录' }}
+          <div class="mb-4 flex flex-wrap justify-between items-center gap-3"><p class="text-xs text-muted">预约 → 卖家确认 → 线下验货 → 输入自提码完成</p><select v-model="orderFilter" aria-label="订单状态筛选" class="rounded-lg border border-line bg-canvas px-3 py-2 text-xs"><option value="">全部订单</option><option value="reserved">已预约</option><option value="confirmed">待自提</option><option value="completed">已完成</option><option value="cancelled">已取消</option></select></div>
+          <p v-if="ordersFor(tab).filter(o => !orderFilter || o.status === orderFilter).length === 0" class="py-14 text-center text-sm text-muted">
+            {{ orderFilter ? '当前状态下暂无订单' : tab === 'buy' ? '还没有预约过物品' : '还没有卖出记录' }}
             <RouterLink :to="{ name: 'market' }" class="block mt-2 text-brand-600 hover:underline">去市集逛逛 →</RouterLink>
           </p>
           <ul v-else class="space-y-3">
-            <li v-for="o in ordersFor(tab)" :key="o.id" class="p-4 rounded-xl border border-line bg-canvas/60">
+            <li v-for="o in ordersFor(tab).filter(o => !orderFilter || o.status === orderFilter)" :key="o.id" class="p-4 rounded-xl border border-line bg-canvas/60">
               <div class="flex flex-wrap items-center gap-3">
                 <RouterLink :to="`/items/${o.item_id}`" class="w-12 h-12 shrink-0">
                   <ItemImage :item="{ image: o.item_image, category: o.item_category, title: o.item_title }" ratio="aspect-square" />
@@ -217,7 +235,7 @@ onMounted(loadAll)
               </div>
               <div v-if="orderActions(o).length" class="mt-3 pt-3 border-t border-line flex flex-wrap gap-2">
                 <button v-for="a in orderActions(o)" :key="a.act" type="button" @click="doOrderAction(o, a.act)"
-                        class="h-8 px-3 rounded-lg text-xs font-semibold transition-colors" :class="a.cls">{{ a.label }}</button>
+                        :disabled="busyOrder !== null" class="h-9 px-3 rounded-lg text-xs font-semibold transition-colors disabled:opacity-50" :class="a.cls">{{ a.label }}</button>
               </div>
             </li>
           </ul>
@@ -236,15 +254,17 @@ onMounted(loadAll)
               </RouterLink>
               <div class="min-w-0 flex-1">
                 <RouterLink :to="`/items/${it.id}`" class="text-sm font-semibold text-ink hover:text-brand-700 dark:hover:text-brand-400 truncate block">{{ it.title }}</RouterLink>
+                <p v-if="it.review_note" class="mt-1 text-xs text-rose-600 dark:text-rose-300">审核意见：{{ it.review_note }}</p>
                 <p class="mt-0.5 text-[11px] text-subtle tnum">¥{{ it.price.toFixed(2) }} · 循环 {{ it.cycle_count }} 次 · 减碳 {{ it.carbon_saved.toFixed(1) }} kg · {{ it.created_at }}</p>
               </div>
+              <span v-if="it.review_status !== 'approved'" class="px-2.5 py-1 rounded-lg text-[11px] font-semibold" :class="reviewChip(it.review_status)">{{ reviewLabel(it.review_status) }}</span>
               <span class="px-2.5 py-1 rounded-lg text-[11px] font-semibold shrink-0" :class="itemStatusChip(it.status)">{{ itemStatusLabel(it.status) }}</span>
               <div class="flex gap-1.5 shrink-0">
-                <button v-if="['available', 'reserved'].includes(it.status)" type="button" @click="editItem = it"
+                <button v-if="it.status === 'available'" type="button" @click="editItem = it"
                         class="h-8 px-2.5 rounded-lg border border-line text-xs text-muted hover:text-ink hover:bg-canvas transition-colors inline-flex items-center gap-1">
                   <Icon name="edit" :size="13" />编辑
                 </button>
-                <button v-if="it.status !== 'offshelf' && it.status !== 'completed'" type="button" @click="askOffshelf(it)"
+                <button v-if="it.status === 'available'" type="button" @click="askOffshelf(it)"
                         class="h-8 px-2.5 rounded-lg border border-line text-xs text-muted hover:text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-500/10 transition-colors inline-flex items-center gap-1">
                   <Icon name="archive" :size="13" />下架
                 </button>
@@ -296,6 +316,7 @@ onMounted(loadAll)
       </div>
     </template>
 
+    <FulfillDialog v-if="completing" :order="completing" @close="completing = null" @saved="completing = null; loadAll(); auth.refresh()" />
     <PublishDialog v-if="editItem" :item="editItem" @close="editItem = null" @saved="editItem = null; loadAll()" />
   </div>
 </template>
