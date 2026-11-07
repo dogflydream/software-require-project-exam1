@@ -15,11 +15,11 @@ const props = defineProps({
 const emit = defineEmits(['reserve', 'favorite'])
 
 const isOwner = computed(() => props.me && props.item.owner_id === props.me.id)
-const canReserve = computed(() => props.me && !isOwner.value && props.item.status === 'available')
+const canReserve = computed(() => !isOwner.value && props.item.status === 'available')
 </script>
 
 <template>
-  <article class="group flex flex-col rounded-xl2 bg-surface border border-line shadow-card hover:shadow-lift hover:-translate-y-0.5 transition-all duration-200">
+  <article class="group flex flex-col rounded-xl2 bg-surface border border-line shadow-card hover:shadow-lift hover:border-brand-200 dark:hover:border-brand-700 transition-all duration-200">
     <div class="relative p-3 pb-0">
       <RouterLink :to="`/items/${item.id}`" :aria-label="`查看 ${item.title} 详情`">
         <ItemImage :item="item" />
@@ -30,7 +30,7 @@ const canReserve = computed(() => props.me && !isOwner.value && props.item.statu
         <span v-else-if="item.status === 'reserved'"
               class="px-2 py-0.5 rounded-full bg-amber-100 dark:bg-amber-400/15 text-amber-700 dark:text-amber-300 text-[11px] font-semibold shadow-sm">已预约</span>
         <button v-if="me" type="button" @click.prevent="$emit('favorite', item)" :disabled="busy"
-                :aria-label="favorited ? '取消收藏' : '收藏'"
+                :aria-pressed="favorited" :aria-label="favorited ? '取消收藏' : '收藏'"
                 class="grid place-items-center w-8 h-8 rounded-lg backdrop-blur bg-white/80 dark:bg-black/40 transition-colors disabled:opacity-50"
                 :class="favorited ? 'text-rose-500' : 'text-slate-400 hover:text-rose-500'">
           <Icon :name="favorited ? 'heartfill' : 'heart'" :size="17" />
@@ -51,7 +51,7 @@ const canReserve = computed(() => props.me && !isOwner.value && props.item.statu
 
       <div class="mt-3 pt-3 border-t border-line flex items-end justify-between gap-2">
         <div class="min-w-0">
-          <p class="text-lg font-bold text-brand-700 dark:text-brand-400 tnum leading-none">¥{{ item.price.toFixed(2) }}</p>
+          <p class="text-lg font-bold text-brand-700 dark:text-brand-400 tnum leading-none">{{ item.price === 0 ? '免费赠送' : '¥' + item.price.toFixed(2) }}</p>
           <RouterLink :to="`/u/${item.owner_id}`" class="mt-1.5 flex items-center gap-1.5 min-w-0 hover:text-brand-700 dark:hover:text-brand-400 transition-colors">
             <Avatar :name="item.owner_name" :user="{ name: item.owner_name, avatar: item.owner_avatar }" :size="18" rounded="rounded-md" />
             <span class="text-[11px] text-subtle truncate">{{ item.owner_name }} · {{ item.owner_college }}</span>

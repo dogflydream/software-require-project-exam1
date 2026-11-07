@@ -88,7 +88,7 @@ onMounted(load)
             <Icon name="coin" :size="17" /><span class="tnum">{{ p.cost_points }}</span>
             <span class="text-[11px] font-medium opacity-70">积分</span>
           </span>
-          <button type="button" @click="redeem(p)" :disabled="!canRedeem(p) || busyId === p.id"
+          <button type="button" @click="redeem(p)" :disabled="!inStock(p) || (auth.isLoggedIn && !canRedeem(p)) || busyId !== null"
                   class="h-9 px-4 rounded-xl text-[13px] font-semibold transition-colors disabled:opacity-40 disabled:cursor-not-allowed inline-flex items-center gap-1.5"
                   :class="canRedeem(p) ? 'bg-amber-500 hover:bg-amber-600 text-white' : 'bg-canvas text-subtle border border-line'">
             <Icon name="gift" :size="15" /> {{ redeemLabel(p) }}

@@ -493,6 +493,19 @@ def list_items(
     return rows_to_dicts(rows)
 
 
+@app.get("/api/items/counts")
+def market_counts(keyword: Optional[str] = Query(None, max_length=50)) -> dict:
+    """市集分类计数，使用与列表相同的可见性和搜索条件，不受分页限制。"""
+    sql = "SELECT category, COUNT(*) AS n FROM items WHERE status IN ('available', 'reserved') AND review_status = 'approved'"
+    params: list = []
+    if keyword:
+        sql += " AND (title LIKE ? OR description LIKE ?)"
+        params += [f"%{keyword}%", f"%{keyword}%"]
+    with database.db_session() as conn:
+        rows = conn.execute(sql + " GROUP BY category", params).fetchall()
+    return {row["category"]: row["n"] for row in rows}
+
+
 @app.get("/api/items/mine", response_model=List[ItemOut])
 def my_items(user: dict = Depends(current_user)) -> List[dict]:
     """我发布的全部物品（含待审核/已驳回，身份取自会话）。"""
@@ -565,7 +578,7 @@ def update_item(item_id: int, payload: ItemUpdate, user: dict = Depends(current_
         if "price" in fields and item["status"] == "reserved":
             raise HTTPException(status_code=400, detail="物品已被预约，不能修改价格")
         if "image" in fields:
-            fields["image"] = save_data_url(fields["image"])
+            fields["image"] = save_data_url(fields["image"]) if fields["image"] else None
         # 重新提交审核：清空上次驳回理由，并记录更新时间
         fields["review_status"] = "pending"
         fields["review_note"] = None

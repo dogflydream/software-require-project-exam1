@@ -16,12 +16,19 @@ const categoryStore = useCategoryStore()
 
 const items = ref([])
 const loading = ref(false)
-const category = ref('')
-const keyword = ref('')
-const sort = ref('latest')
+const category = ref(typeof router.currentRoute.value.query.category === 'string' ? router.currentRoute.value.query.category : '')
+const keyword = ref(typeof router.currentRoute.value.query.q === 'string' ? router.currentRoute.value.query.q.slice(0, 50) : '')
+const sort = ref(['latest', 'price_asc', 'price_desc', 'cycle'].includes(router.currentRoute.value.query.sort) ? router.currentRoute.value.query.sort : 'latest')
 const hasMore = ref(false)
 const PAGE = 24
 const counts = ref({})
+const error = ref('')
+let requestId = 0
+let countsId = 0
+const resultCount = computed(() => categoryCount(category.value))
+function resetFilters() {
+  keyword.value = ''; category.value = ''; sort.value = 'latest'
+}
 const favIds = ref(new Set())
 const busyId = ref(null)
 const showPublish = ref(false)
@@ -42,7 +49,15 @@ function onSearchInput() {
 }
 
 async function loadItems(reset = true) {
+  clearTimeout(searchTimer)
+  const id = ++requestId
   loading.value = true
+  error.value = ''
+  if (reset) {
+    items.value = []
+    countsId++
+    router.replace({ query: { ...(category.value ? { category: category.value } : {}), ...(keyword.value ? { q: keyword.value } : {}), ...(sort.value !== 'latest' ? { sort: sort.value } : {}) } })
+  }
   try {
     const p = new URLSearchParams()
     if (category.value) p.set('category', category.value)
@@ -51,23 +66,23 @@ async function loadItems(reset = true) {
     p.set('limit', String(PAGE + 1))
     if (!reset) p.set('offset', String(items.value.length))
     const list = await api.get('/api/items?' + p)
+    if (id !== requestId) return
     hasMore.value = list.length > PAGE
     const page = list.slice(0, PAGE)
     items.value = reset ? page : items.value.concat(page)
     if (reset) { loadCounts(); if (auth.isLoggedIn) loadFavorites() }
   } catch (e) {
-    ui.toast(e.message, 'error')
+    if (id === requestId) error.value = e.message
   } finally {
-    loading.value = false
+    if (id === requestId) loading.value = false
   }
 }
 
 async function loadCounts() {
   try {
-    const all = await api.get('/api/items?limit=200')
-    const c = {}
-    all.forEach(i => { c[i.category] = (c[i.category] || 0) + 1 })
-    counts.value = c
+    const id = ++countsId
+    const data = await api.get('/api/items/counts?' + new URLSearchParams({ keyword: keyword.value }))
+    if (id === countsId) counts.value = data
   } catch { /* 计数失败不影响主列表 */ }
 }
 
@@ -80,6 +95,7 @@ async function loadFavorites() {
 
 async function toggleFavorite(item) {
   if (!auth.isLoggedIn) { router.push({ name: 'login', query: { redirect: '/' } }); return }
+  if (busyId.value !== null) return
   busyId.value = item.id
   const on = favIds.value.has(item.id)
   try {
@@ -98,6 +114,7 @@ async function toggleFavorite(item) {
 
 async function reserve(item) {
   if (!auth.isLoggedIn) { router.push({ name: 'login', query: { redirect: '/' } }); return }
+  if (busyId.value !== null) return
   busyId.value = item.id
   try {
     const o = await api.post('/api/orders', { item_id: item.id })
@@ -129,55 +146,53 @@ async function loadSummary() {
 }
 
 watch([category, sort], () => loadItems(true))
+watch(keyword, () => { requestId++; countsId++; loading.value = true; items.value = []; onSearchInput() })
+watch(() => auth.user?.id, () => { favIds.value = new Set(); if (auth.isLoggedIn) loadFavorites() })
 onMounted(() => { categoryStore.load(); loadItems(true); loadSummary() })
-onUnmounted(() => clearTimeout(searchTimer))
+onUnmounted(() => { clearTimeout(searchTimer); requestId++; countsId++ })
 </script>
 
 <template>
   <div class="animate-rise">
-    <!-- Hero -->
-    <div class="relative overflow-hidden rounded-xl2 border border-line bg-gradient-to-br from-brand-600 via-brand-700 to-emerald-900 text-white p-6 sm:p-8 shadow-card">
-      <div class="absolute -right-16 -top-20 w-72 h-72 rounded-full bg-white/10 blur-2xl"></div>
-      <div class="absolute right-24 -bottom-24 w-56 h-56 rounded-full bg-brand-300/20 blur-2xl"></div>
-      <div class="relative">
-        <p class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-white/15 text-[11px] font-medium backdrop-blur">
-          <Icon name="sparkle" :size="13" /> 让每一本教材多流转一次
-        </p>
-        <h1 class="mt-3 text-2xl sm:text-3xl font-bold tracking-tight">绿色市集</h1>
-        <p class="mt-1.5 text-sm text-white/80 max-w-xl">
-          浏览、检索并预约校园闲置教材与物品。完成一次流转，卖家即得
-          <b class="text-white">20 碳积分</b>，物品循环度 +1。
-        </p>
-
-        <div class="mt-5 flex flex-col sm:flex-row gap-2.5 max-w-2xl">
-          <div class="relative flex-1">
-            <Icon name="search" :size="18" class="absolute left-3.5 top-1/2 -translate-y-1/2 text-white/60 pointer-events-none" />
-            <input v-model.trim="keyword" @keyup.enter="loadItems(true)" @input="onSearchInput"
-                   placeholder="搜索教材、考研资料、生活用品…" aria-label="搜索闲置物品"
-                   class="w-full h-11 pl-11 pr-10 rounded-xl bg-white/95 text-ink placeholder:text-slate-400 border-0 text-sm focus:outline-none focus:ring-2 focus:ring-white/70" />
-            <button v-if="keyword" type="button" @click="keyword = ''; loadItems(true)" aria-label="清除搜索"
-                    class="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600">
-              <Icon name="close" :size="16" />
-            </button>
-          </div>
-          <button type="button" @click="openPublish"
-                  class="h-11 px-5 rounded-xl bg-white text-brand-700 text-sm font-semibold hover:bg-brand-50 transition-colors inline-flex items-center justify-center gap-2 shadow-sm">
-            <Icon name="plus" :size="17" /> 发布闲置
-          </button>
+    <section class="market-hero">
+      <div class="hero-copy">
+        <span class="hero-eyebrow"><span class="status-dot"></span> GREEN CAMPUS · 校园循环计划</span>
+        <h1>让闲置，<br />遇见<span>下一份热爱。</span></h1>
+        <p class="hero-description">一本读过的书，一件陪伴过的好物。<br class="hidden sm:block" />在校园里继续它们的故事，也让绿色生活多一种可能。</p>
+        <div class="mt-6 flex flex-wrap gap-3">
+          <button type="button" @click="openPublish" class="primary-action"><Icon name="plus" :size="18" />发布我的闲置</button>
+          <RouterLink to="/dashboard" class="secondary-action">看看循环的力量 <Icon name="chart" :size="17" /></RouterLink>
         </div>
-
-        <div class="mt-5 flex flex-wrap gap-x-6 gap-y-2 text-xs text-white/75">
-          <span class="inline-flex items-center gap-1.5"><Icon name="box" :size="14" /> 在售 <b class="text-white tnum">{{ items.length }}</b> 件</span>
-          <span class="inline-flex items-center gap-1.5"><Icon name="recycle" :size="14" /> 累计循环 <b class="text-white tnum">{{ summary.total_cycles ?? 0 }}</b> 次</span>
-          <span class="inline-flex items-center gap-1.5"><Icon name="tree" :size="14" /> 累计减碳 <b class="text-white tnum">{{ summary.total_carbon_kg ?? 0 }}</b> kg</span>
-        </div>
+        <div class="hero-note"><Icon name="shield" :size="14" /> 校园内流转 <span>·</span> 线下验货自提 <span>·</span> 碳积分奖励</div>
       </div>
-    </div>
+      <div class="hero-art" aria-hidden="true">
+        <span class="orbit orbit-one"></span><span class="orbit orbit-two"></span>
+        <span class="art-spark art-spark-one">+</span><span class="art-spark art-spark-two">+</span>
+        <div class="art-label"><Icon name="recycle" :size="15" /> 好物的下一站，就在校园</div>
+        <div class="illustration-book book-back"><span>KEEP<br />GROWING.</span><Icon name="leaf" :size="38" /></div>
+        <div class="illustration-book book-front"><small>THE CIRCULAR LIFE</small><span>旧物<br />新生<span class="book-period">.</span></span><div class="book-line"></div><small>每一次循环，都是新的开始</small></div>
+        <div class="art-badge"><Icon name="leaf" :size="22" /><div><strong>小小循环，大大改变</strong><span>完成流转 · 卖家 +20 碳积分</span></div></div>
+      </div>
+    </section>
 
+    <section class="impact-strip" aria-label="校园循环成果">
+      <div><span class="impact-icon"><Icon name="recycle" :size="21" /></span><p><strong>{{ summary.total_cycles ?? '—' }}<small>次</small></strong><span>闲置重新出发</span></p></div>
+      <div><span class="impact-icon"><Icon name="leaf" :size="21" /></span><p><strong>{{ summary.total_carbon_kg ?? '—' }}<small>kg</small></strong><span>累计估算减碳</span></p></div>
+      <div><span class="impact-icon"><Icon name="user" :size="21" /></span><p><strong>{{ summary.total_users ?? '—' }}<small>人</small></strong><span>一起参与绿色生活</span></p></div>
+      <RouterLink to="/mall" class="impact-invite"><Icon name="gift" :size="23" /><span><b>让绿色行动有回报</b><small>发布闲置赚积分，兑换校园好礼</small></span><Icon name="chevron" :size="16" class="-rotate-90" /></RouterLink>
+    </section>
+
+    <div class="market-heading"><div><p class="section-eyebrow">DISCOVER SOMETHING GOOD</p><h2>逛逛校园好物<span>为需要的生活，发现刚刚好的选择</span></h2></div></div>
+    <form class="market-search" role="search" @submit.prevent="loadItems(true)">
+      <Icon name="search" :size="20" class="text-muted shrink-0" />
+      <input v-model.trim="keyword" maxlength="50" placeholder="搜索教材、考研资料、生活好物…" aria-label="搜索闲置物品" />
+      <button v-if="keyword" type="button" @click="keyword = ''" aria-label="清除搜索" class="search-clear"><Icon name="close" :size="17" /></button>
+      <button type="submit" class="search-submit">搜索好物</button>
+    </form>
     <!-- 筛选 -->
     <div class="mt-5 flex flex-wrap items-center gap-2">
-      <div class="flex items-center gap-1 p-1 rounded-xl bg-surface border border-line" role="tablist" aria-label="分类筛选">
-        <button v-for="c in categories" :key="c.key || 'all'" type="button" role="tab" :aria-selected="category === c.key"
+      <div class="category-filters flex flex-wrap items-center gap-1 p-1 rounded-xl bg-surface border border-line" role="group" aria-label="分类筛选">
+        <button v-for="c in categories" :key="c.key || 'all'" type="button" :aria-pressed="category === c.key"
                 @click="category = c.key"
                 class="px-3.5 py-1.5 rounded-lg text-sm font-medium transition-colors inline-flex items-center gap-1.5"
                 :class="category === c.key ? 'bg-brand-600 text-white shadow-sm' : 'text-muted hover:text-ink hover:bg-canvas'">
@@ -197,6 +212,13 @@ onUnmounted(() => clearTimeout(searchTimer))
       </div>
     </div>
 
+    <div class="mt-4 flex flex-wrap items-center justify-between gap-2 text-xs text-muted" aria-live="polite">
+      <span>{{ loading ? '正在寻找校园好物…' : `共 ${resultCount} 件好物${keyword ? '与「' + keyword + '」相关' : '，等你发现'}` }}</span>
+      <button v-if="keyword || category || sort !== 'latest'" type="button" @click="resetFilters" class="text-brand-700 dark:text-brand-300 hover:underline">重置筛选</button>
+    </div>
+    <div v-if="error" role="alert" class="mt-4 rounded-xl border border-line bg-surface p-5 flex flex-wrap items-center justify-between gap-3">
+      <span class="text-sm text-muted">{{ error }}</span><button type="button" @click="loadItems(items.length === 0)" class="secondary-action"><Icon name="refresh" :size="16" />重新加载</button>
+    </div>
     <!-- 骨架屏 -->
     <div v-if="loading && items.length === 0" class="mt-5 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
       <div v-for="n in 8" :key="n" class="p-3 rounded-xl2 bg-surface border border-line">
@@ -208,7 +230,7 @@ onUnmounted(() => clearTimeout(searchTimer))
     </div>
 
     <!-- 空态 -->
-    <div v-else-if="items.length === 0" class="mt-8 grid place-items-center py-20 rounded-xl2 bg-surface border border-dashed border-line">
+    <div v-else-if="items.length === 0 && !error" class="mt-8 grid place-items-center py-20 rounded-xl2 bg-surface border border-dashed border-line">
       <span class="grid place-items-center w-16 h-16 rounded-2xl bg-brand-50 dark:bg-brand-500/10 text-brand-600"><Icon name="search" :size="28" /></span>
       <p class="mt-4 font-semibold text-ink">暂无符合条件的闲置物品</p>
       <p class="mt-1 text-sm text-muted">换个关键词或分类试试，也可以成为第一个发布者</p>
@@ -219,18 +241,20 @@ onUnmounted(() => clearTimeout(searchTimer))
     </div>
 
     <!-- 网格 -->
-    <div v-else class="mt-5 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
+    <div v-else-if="items.length" class="mt-5 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
       <ItemCard v-for="it in items" :key="it.id" :item="it" :me="auth.user"
-                :favorited="favIds.has(it.id)" :busy="busyId === it.id"
+                :favorited="favIds.has(it.id)" :busy="busyId !== null"
                 @reserve="reserve" @favorite="toggleFavorite" />
     </div>
 
-    <div v-if="!loading && items.length > 0 && hasMore" class="mt-6 text-center">
-      <button type="button" @click="loadItems(false)"
+    <div v-if="items.length > 0 && hasMore" class="mt-6 text-center">
+      <button type="button" @click="loadItems(false)" :disabled="loading"
               class="px-5 py-2.5 rounded-xl bg-surface border border-line text-sm font-medium text-ink hover:bg-canvas transition-colors inline-flex items-center gap-2">
-        <Icon name="arrowdown" :size="16" /> 加载更多
+        <Icon name="arrowdown" :size="16" /> {{ loading ? '加载中…' : '发现更多好物' }}
       </button>
     </div>
+
+    <p v-if="!loading && items.length && !hasMore" class="py-9 text-center text-xs text-muted">好物已全部呈现 · 让每一次循环都有意义</p>
 
     <PublishDialog v-if="showPublish" @close="showPublish = false" @saved="onPublished" />
   </div>

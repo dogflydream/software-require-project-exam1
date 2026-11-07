@@ -1,5 +1,6 @@
 <script setup>
 import { ref, computed, onMounted } from 'vue'
+import { useDialogFocus } from '@/composables/useDialogFocus'
 import Icon from '@/components/Icon.vue'
 import { api, fileToCompressedDataURL } from '@/lib/api'
 import { useUiStore } from '@/stores/ui'
@@ -23,17 +24,17 @@ const err = ref({})
 const saving = ref(false)
 const readingImage = ref(false)
 const fileInput = ref(null)
+const dialogEl = ref(null)
+useDialogFocus(dialogEl, () => { if (!saving.value) close() })
 
 const carbonHint = computed(() => categories.factorOf(form.value.category))
 
 onMounted(async () => {
-  // 弹层打开时锁定背景滚动
-  document.body.style.overflow = 'hidden'
   await categories.load()
   if (!form.value.category) form.value.category = categories.defaultName
 })
 function close() {
-  document.body.style.overflow = ''
+  if (saving.value) return
   emit('close')
 }
 
@@ -60,10 +61,11 @@ function clearImage() {
 
 async function submit() {
   const e = {}
+  if (saving.value || readingImage.value) return
   if (!form.value.title) e.title = '请填写物品名称'
-  if (form.value.price == null || form.value.price < 0) e.price = '价格不能为负'
+  if (typeof form.value.price !== 'number' || !Number.isFinite(form.value.price) || form.value.price < 0 || form.value.price > 99999) e.price = '请输入 0 至 99999 之间的有效价格'
   err.value = e
-  if (Object.keys(e).length) return
+  if (Object.keys(e).length) { document.getElementById(e.title ? 'p-title' : 'p-price')?.focus(); return }
 
   saving.value = true
   try {
@@ -74,6 +76,7 @@ async function submit() {
       price: form.value.price,
     }
     if (form.value.image) body.image = form.value.image
+    else if (isEdit && !preview.value && props.item.image) body.image = ''
     if (isEdit) {
       await api.patch(`/api/items/${props.item.id}`, body)
       ui.toast('物品信息已更新')
@@ -81,7 +84,6 @@ async function submit() {
       await api.post('/api/items', body)
       ui.toast('发布成功！获得 10 碳积分')
     }
-    document.body.style.overflow = ''
     emit('saved')
   } catch (e2) {
     err.value = { global: e2.message }
@@ -92,12 +94,13 @@ async function submit() {
 </script>
 
 <template>
+  <Teleport to="body">
   <transition name="fade" appear>
     <div class="fixed inset-0 z-50 bg-black/50 backdrop-blur-sm flex items-end sm:items-center justify-center p-0 sm:p-4"
          @click.self="close">
       <transition name="sheet" appear>
         <div class="w-full sm:max-w-lg bg-elevated rounded-t-2xl sm:rounded-2xl shadow-lift max-h-[92vh] overflow-y-auto"
-             role="dialog" aria-modal="true" :aria-label="isEdit ? '编辑闲置物品' : '发布闲置物品'">
+             ref="dialogEl" tabindex="-1" role="dialog" aria-modal="true" :aria-label="isEdit ? '编辑闲置物品' : '发布闲置物品'">
           <div class="flex items-center justify-between px-5 py-4 border-b border-line sticky top-0 bg-elevated/95 backdrop-blur z-10">
             <h3 class="font-semibold text-ink">{{ isEdit ? '编辑闲置物品' : '发布闲置物品' }}</h3>
             <button type="button" @click="close" aria-label="关闭"
@@ -139,9 +142,9 @@ async function submit() {
 
             <div>
               <label for="p-title" class="block text-[13px] font-medium text-ink mb-1.5">物品名称 <span class="text-rose-500">*</span></label>
-              <input id="p-title" v-model.trim="form.title" maxlength="100" placeholder="例如：《数据结构（C语言版）》严蔚敏"
+              <input id="p-title" data-initial-focus :aria-invalid="!!err.title" aria-describedby="p-title-error" v-model.trim="form.title" maxlength="100" placeholder="例如：《数据结构（C语言版）》严蔚敏"
                      class="w-full h-11 px-3.5 rounded-xl bg-canvas border border-line text-sm text-ink placeholder:text-subtle focus:outline-none focus:ring-2 focus:ring-brand-500/40" />
-              <p v-if="err.title" class="mt-1 text-[12px] text-rose-500">{{ err.title }}</p>
+              <p v-if="err.title" id="p-title-error" role="alert" class="mt-1 text-[12px] text-rose-500">{{ err.title }}</p>
             </div>
 
             <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -149,7 +152,7 @@ async function submit() {
                 <label class="block text-[13px] font-medium text-ink mb-1.5">分类</label>
                 <!-- 分类由管理员维护，此处动态渲染，新增分类无需改前端 -->
                 <div class="flex flex-wrap gap-1.5 p-1 rounded-xl bg-canvas border border-line">
-                  <button v-for="c in categories.list" :key="c.id" type="button" @click="form.category = c.name"
+                  <button v-for="c in categories.list" :key="c.id" type="button" @click="form.category = c.name" :aria-pressed="form.category === c.name"
                           class="px-3 py-2 rounded-lg text-[12px] font-medium transition-colors inline-flex items-center gap-1.5"
                           :class="form.category === c.name ? 'bg-brand-600 text-white' : 'text-muted hover:text-ink'">
                     <Icon :name="c.icon || 'box'" :size="13" />{{ c.name }}
@@ -161,9 +164,9 @@ async function submit() {
               </div>
               <div>
                 <label for="p-price" class="block text-[13px] font-medium text-ink mb-1.5">价格（元）</label>
-                <input id="p-price" v-model.number="form.price" type="number" min="0" step="0.1"
+                <input id="p-price" :aria-invalid="!!err.price" aria-describedby="p-price-error" v-model.number="form.price" type="number" min="0" max="99999" step="0.01"
                        class="w-full h-11 px-3.5 rounded-xl bg-canvas border border-line text-sm text-ink tnum focus:outline-none focus:ring-2 focus:ring-brand-500/40" />
-                <p v-if="err.price" class="mt-1 text-[12px] text-rose-500">{{ err.price }}</p>
+                <p v-if="err.price" id="p-price-error" role="alert" class="mt-1 text-[12px] text-rose-500">{{ err.price }}</p>
               </div>
             </div>
 
@@ -181,7 +184,7 @@ async function submit() {
               <Icon name="info" :size="16" class="mt-px shrink-0" />
               <span>修改后物品需<b>重新提交审核</b>，审核通过前将暂时从市集下架。</span>
             </div>
-            <p v-if="err.global" class="text-[13px] text-rose-500">{{ err.global }}</p>
+            <p v-if="err.global" role="alert" class="text-[13px] text-rose-500">{{ err.global }}</p>
           </div>
 
           <div class="flex justify-end gap-2 px-5 py-4 border-t border-line sticky bottom-0 bg-elevated/95 backdrop-blur">
@@ -197,4 +200,5 @@ async function submit() {
       </transition>
     </div>
   </transition>
+  </Teleport>
 </template>

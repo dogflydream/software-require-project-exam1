@@ -50,10 +50,11 @@ export const api = {
 /** 将图片文件等比压缩为 data URL，避免上传超大原图。 */
 export function fileToCompressedDataURL(file, maxSize = 1280, quality = 0.85) {
   return new Promise((resolve, reject) => {
-    if (!file.type.startsWith('image/')) {
-      reject(new Error('请选择图片文件'))
+    if (!['image/png', 'image/jpeg', 'image/webp', 'image/gif'].includes(file.type)) {
+      reject(new Error('请选择 PNG、JPG、WebP 或 GIF 图片'))
       return
     }
+    if (file.size > 20 * 1024 * 1024) { reject(new Error('原图请小于 20MB')); return }
     const reader = new FileReader()
     reader.onerror = () => reject(new Error('读取图片失败'))
     reader.onload = () => {
@@ -69,7 +70,9 @@ export function fileToCompressedDataURL(file, maxSize = 1280, quality = 0.85) {
         canvas.height = height
         canvas.getContext('2d').drawImage(img, 0, 0, width, height)
         const mime = file.type === 'image/png' ? 'image/png' : 'image/jpeg'
-        resolve(canvas.toDataURL(mime, quality))
+        const result = canvas.toDataURL(mime, quality)
+        if (result.split(',')[1].length * 3 / 4 > 2 * 1024 * 1024) { reject(new Error('压缩后的图片仍超过 2MB，请选择较小的图片')); return }
+        resolve(result)
       }
       img.src = reader.result
     }

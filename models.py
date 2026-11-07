@@ -90,7 +90,7 @@ class ItemCreate(BaseModel):
     category: str = Field(min_length=1, max_length=10, description="分类名称，需为已启用的分类")
     description: str = Field(default="", max_length=500)
     price: float = Field(default=0, ge=0, le=99999)
-    image: Optional[str] = Field(default=None, max_length=300)
+    image: Optional[str] = Field(default=None, max_length=2_800_000)
 
 
 class ItemUpdate(BaseModel):
@@ -98,7 +98,7 @@ class ItemUpdate(BaseModel):
     category: Optional[str] = Field(default=None, min_length=1, max_length=10)
     description: Optional[str] = Field(default=None, max_length=500)
     price: Optional[float] = Field(default=None, ge=0, le=99999)
-    image: Optional[str] = Field(default=None, max_length=300)
+    image: Optional[str] = Field(default=None, max_length=2_800_000)
 
 
 class ItemOut(BaseModel):

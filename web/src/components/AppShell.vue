@@ -1,5 +1,5 @@
 <script setup>
-import { ref, computed } from 'vue'
+import { ref, computed, watch } from 'vue'
 import { RouterLink, useRoute, useRouter } from 'vue-router'
 import Icon from './Icon.vue'
 import Avatar from './Avatar.vue'
@@ -12,6 +12,8 @@ const route = useRoute()
 const router = useRouter()
 const menuOpen = ref(false)
 const menuEl = ref(null)
+watch(() => route.fullPath, () => { menuOpen.value = false })
+const activeTab = computed(() => ['profile-edit', 'user'].includes(route.name) ? 'me' : route.name === 'item' ? 'market' : route.name)
 
 const tabs = computed(() => {
   const t = [
@@ -38,7 +40,8 @@ function closeMenu(e) {
 </script>
 
 <template>
-  <div class="min-h-screen flex flex-col" @click="closeMenu">
+  <div class="min-h-screen flex flex-col" @keydown.esc="menuOpen = false" @click="closeMenu">
+    <a href="#main-content" class="skip-link">跳转到主要内容</a>
     <header class="sticky top-0 z-40 bg-surface/85 backdrop-blur-xl border-b border-line">
       <div class="mx-auto max-w-7xl px-4">
         <div class="h-16 flex items-center gap-3">
@@ -46,25 +49,25 @@ function closeMenu(e) {
             <span class="grid place-items-center w-9 h-9 rounded-xl bg-gradient-to-br from-brand-400 to-brand-700 text-white shadow-card">
               <Icon name="leaf" :size="20" />
             </span>
-            <span class="hidden sm:block leading-tight">
+            <span class="block leading-tight">
               <span class="block font-bold text-[15px] tracking-tight text-ink">绿循校园</span>
-              <span class="block text-[11px] text-subtle">闲置循环 · 碳积分 · 绿色校园</span>
+              <span class="hidden sm:block text-[11px] text-subtle">闲置循环 · 碳积分 · 绿色校园</span>
             </span>
           </RouterLink>
 
-          <nav class="flex-1 min-w-0 overflow-x-auto no-bar" aria-label="主导航">
+          <nav class="hidden sm:block flex-1 min-w-0 overflow-x-auto no-bar" aria-label="主导航">
             <div class="flex items-center gap-1">
               <RouterLink v-for="t in tabs" :key="t.name" :to="{ name: t.name }"
                           class="group flex items-center gap-2 px-3 py-2 rounded-xl text-sm font-medium whitespace-nowrap transition-colors"
-                          :class="route.name === t.name ? 'bg-brand-50 dark:bg-brand-500/15 text-brand-700 dark:text-brand-300' : 'text-muted hover:text-ink hover:bg-canvas'"
-                          :aria-current="route.name === t.name ? 'page' : undefined">
+                          :class="activeTab === t.name ? 'bg-brand-50 dark:bg-brand-500/15 text-brand-700 dark:text-brand-300' : 'text-muted hover:text-ink hover:bg-canvas'"
+                          :aria-current="activeTab === t.name ? 'page' : undefined">
                 <Icon :name="t.icon" :size="18" />
                 <span class="hidden md:inline">{{ t.label }}</span>
               </RouterLink>
             </div>
           </nav>
 
-          <div class="flex items-center gap-2 shrink-0">
+          <div class="ml-auto flex items-center gap-2 shrink-0">
             <button type="button" @click="ui.toggleTheme()"
                     class="grid place-items-center w-9 h-9 rounded-xl border border-line text-muted hover:text-ink hover:bg-canvas transition-colors"
                     :aria-label="ui.theme === 'dark' ? '切换到浅色模式' : '切换到深色模式'">
@@ -80,7 +83,7 @@ function closeMenu(e) {
             <div v-if="auth.isLoggedIn" class="relative" ref="menuEl">
               <button type="button" @click.stop="menuOpen = !menuOpen"
                       class="flex items-center gap-2 h-9 pl-1 pr-2.5 rounded-xl border border-line hover:bg-canvas transition-colors"
-                      aria-haspopup="menu" :aria-expanded="menuOpen ? 'true' : 'false'">
+                      aria-label="账号菜单" aria-haspopup="menu" :aria-expanded="menuOpen ? 'true' : 'false'">
                 <Avatar :user="auth.user" :size="28" rounded="rounded-lg" />
                 <span class="hidden sm:block max-w-[92px] truncate text-sm text-ink">{{ auth.user.name }}</span>
                 <Icon name="chevron" :size="14" class="text-subtle" />
@@ -126,11 +129,14 @@ function closeMenu(e) {
       </div>
     </header>
 
-    <main class="flex-1 mx-auto w-full max-w-7xl px-4 py-6">
+    <main id="main-content" tabindex="-1" class="app-main flex-1 mx-auto w-full max-w-7xl px-4 py-6">
       <slot />
     </main>
 
-    <footer class="border-t border-line mt-auto">
+    <nav class="mobile-nav fixed bottom-0 inset-x-0 z-40 sm:hidden bg-surface border-t border-line flex" aria-label="移动端主导航">
+      <RouterLink v-for="t in tabs" :key="t.name" :to="{ name: t.name }" class="flex-1 flex flex-col items-center justify-center gap-1 min-h-[64px] text-[10px] font-medium" :class="activeTab === t.name ? 'text-brand-700 dark:text-brand-300 bg-brand-50 dark:bg-brand-500/10' : 'text-muted'" :aria-current="activeTab === t.name ? 'page' : undefined"><Icon :name="t.icon" :size="21" />{{ t.label }}</RouterLink>
+    </nav>
+    <footer class="border-t border-line mt-auto mb-16 sm:mb-0">
       <div class="mx-auto max-w-7xl px-4 py-6 flex flex-wrap items-center justify-between gap-2 text-xs text-subtle">
         <p>绿循校园 GreenCampus · 校园闲置教材与物品循环流转系统</p>
         <p>校园闲置循环 · 碳积分激励</p>
