@@ -239,3 +239,23 @@ CREATE TABLE IF NOT EXISTS app_metadata (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+
+
+-- First-party order conversations. No external contact information is required.
+CREATE TABLE IF NOT EXISTS order_messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    order_id INTEGER NOT NULL REFERENCES orders(id),
+    sender_id INTEGER NOT NULL REFERENCES users(id),
+    content TEXT NOT NULL CHECK(length(content) BETWEEN 1 AND 1000),
+    client_nonce TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+    UNIQUE(order_id, sender_id, client_nonce)
+);
+CREATE INDEX IF NOT EXISTS idx_order_messages_order ON order_messages(order_id, id);
+CREATE INDEX IF NOT EXISTS idx_order_messages_sender ON order_messages(sender_id, created_at);
+CREATE TABLE IF NOT EXISTS order_message_reads (
+    order_id INTEGER NOT NULL REFERENCES orders(id),
+    user_id INTEGER NOT NULL REFERENCES users(id),
+    last_message_id INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY(order_id, user_id)
+);

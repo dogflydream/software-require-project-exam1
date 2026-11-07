@@ -118,7 +118,7 @@ reg.call("POST", "/api/reports", {"item_id": iid, "reason": "描述与实物不�
 
 print("=" * 80)
 print("四、资料与头像")
-stu.call("PATCH", "/api/users/me", {"bio": "热爱循环利用", "contact": "wx: zhang"}, expect=200, label="更新本人资料")
+stu.call("PATCH", "/api/users/me", {"bio": "热爱循环利用"}, expect=200, label="更新本人资料")
 stu.call("PATCH", "/api/users/me", {}, expect=400, label="空更新被拒")
 tiny_png = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
 stu.call("POST", "/api/users/me/avatar", {"image": tiny_png}, expect=200, label="上传头像")
@@ -331,16 +331,16 @@ pend_buyer.call("POST", "/api/orders", {"item_id": pit["id"]}, expect=400, label
 pend_buyer.call("POST", "/api/favorites", {"item_id": pit["id"]}, expect=400, label="收藏待审物品被拒")
 
 print("=" * 80)
-print("十五、联系方式仅对交易对方可见")
+print("十五、停止收集联系方式并使用站内沟通")
 ct_owner = login_client("20230101")
 ct_buyer = login_client("20230205")
-ct_owner.call("PATCH", "/api/users/me", {"contact": "wx: test_owner"}, expect=200, label="物主填写联系方式")
+ct_owner.call("PATCH", "/api/users/me", {"contact": "wx: test_owner"}, expect=422, label="拒绝收集联系方式")
 ct_item = ct_owner.call("POST", "/api/items",
                         {"title": "联系方式用例", "category": "教材", "price": 1}, expect=201)
 ct_order = ct_buyer.call("POST", "/api/orders", {"item_id": ct_item["id"]}, expect=201, label="买家预约")
 buyer_contact = ct_order.get("counterparty_contact")
-print(f"        {'PASS' if buyer_contact == 'wx: test_owner' else 'FAIL'} 买家可见卖家联系方式（{buyer_contact}）")
-passed, failed = passed + (buyer_contact == "wx: test_owner"), failed + (buyer_contact != "wx: test_owner")
+print(f"        {'PASS' if buyer_contact is None else 'FAIL'} 订单不再返回卖家联系方式（{buyer_contact}）")
+passed, failed = passed + (buyer_contact is None), failed + (buyer_contact is not None)
 
 ct_third = login_client("20230418")
 third_orders = ct_third.call("GET", "/api/orders", expect=200, label="第三方订单列表")

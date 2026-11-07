@@ -78,7 +78,6 @@ MIGRATIONS = [
     ("users", "password_hash", "TEXT"),
     ("users", "avatar", "TEXT"),
     ("users", "bio", "TEXT"),
-    ("users", "contact", "TEXT"),
     ("items", "image", "TEXT"),
     ("items", "review_status", "TEXT DEFAULT 'approved'"),
     ("items", "review_note", "TEXT"),
@@ -102,3 +101,9 @@ def _migrate(conn) -> None:
         for order in active:
             conn.execute("UPDATE orders SET pickup_code = ? WHERE id = ?", (f"GC-{secrets.token_hex(3).upper()}", order['id']))
         conn.execute("INSERT INTO app_metadata (key, value) VALUES ('pickup_policy', 'buyer-holds-seller-verifies-v1')")
+
+    if conn.execute("SELECT 1 FROM app_metadata WHERE key = 'contact_retired'").fetchone() is None:
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(users)")}
+        if 'contact' in columns:
+            conn.execute("UPDATE users SET contact = NULL")
+        conn.execute("INSERT INTO app_metadata (key, value) VALUES ('contact_retired', 'order-chat-v1')")

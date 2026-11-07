@@ -1,7 +1,7 @@
 """Pydantic 数据模型（绿循校园）。"""
 from typing import Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 ITEM_STATUSES = ("available", "reserved", "completed", "offshelf")
 REVIEW_STATUSES = ("approved", "pending", "rejected")
@@ -65,7 +65,6 @@ class UserOut(BaseModel):
     points: int
     avatar: Optional[str] = None
     bio: Optional[str] = None
-    contact: Optional[str] = None
 
 
 class UserPublic(BaseModel):
@@ -81,7 +80,14 @@ class ProfileUpdate(BaseModel):
     name: Optional[str] = Field(default=None, min_length=1, max_length=20)
     college: Optional[str] = Field(default=None, max_length=30)
     bio: Optional[str] = Field(default=None, max_length=200)
-    contact: Optional[str] = Field(default=None, max_length=100)
+
+
+    @model_validator(mode="before")
+    @classmethod
+    def reject_contact(cls, value):
+        if isinstance(value, dict) and "contact" in value:
+            raise ValueError("平台不再收集联系方式，请使用订单站内沟通")
+        return value
 
 
 # ---------- 物品 ----------
@@ -209,9 +215,6 @@ class OrderOut(BaseModel):
     buyer_name: str = ""
     seller_id: int
     seller_name: str = ""
-    # 交易对方的联系方式：仅订单参与方可见，用于线下履约联系（非参与方为 None）
-    counterparty_name: Optional[str] = None
-    counterparty_contact: Optional[str] = None
     status: str
     # Only the buyer receives an active order pickup credential.
     pickup_code: Optional[str] = None
@@ -269,3 +272,29 @@ class Health(BaseModel):
     status: str
     app: str
     version: str = ""
+
+
+class MessageCreate(BaseModel):
+    content: str = Field(min_length=1, max_length=1000)
+    client_nonce: str = Field(min_length=8, max_length=64, pattern="^[a-zA-Z0-9_-]+$")
+
+    @field_validator("content")
+    @classmethod
+    def trim_content(cls, value):
+        value = value.strip()
+        if not value:
+            raise ValueError("消息内容不能为空")
+        return value
+
+
+class MessageOut(BaseModel):
+    id: int
+    order_id: int
+    sender_id: int
+    content: str
+    client_nonce: str
+    created_at: str
+
+
+class MessageRead(BaseModel):
+    last_message_id: int = Field(ge=1)

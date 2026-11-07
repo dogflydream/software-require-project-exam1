@@ -10,6 +10,7 @@ const routes = [
   { path: '/mall', name: 'mall', component: () => import('@/views/MallView.vue'), meta: { title: '积分商城' } },
   { path: '/dashboard', name: 'dashboard', component: () => import('@/views/DashboardView.vue'), meta: { title: '绿色大屏' } },
   { path: '/me', name: 'me', component: () => import('@/views/ProfileView.vue'), meta: { requiresAuth: true, title: '个人中心' } },
+  { path: '/messages/:orderId?', name: 'messages', component: () => import('@/views/MessagesView.vue'), meta: { requiresAuth: true, title: '站内消息' } },
   { path: '/me/edit', name: 'profile-edit', component: () => import('@/views/ProfileEditView.vue'), meta: { requiresAuth: true, title: '编辑资料' } },
   { path: '/u/:id', name: 'user', component: () => import('@/views/UserProfileView.vue'), meta: { title: '用户主页' } },
   { path: '/admin', name: 'admin', component: () => import('@/views/AdminView.vue'), meta: { requiresAuth: true, requiresAdmin: true, title: '后台管理' } },

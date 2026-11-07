@@ -35,11 +35,11 @@ from models import (
     Health, ItemCreate, ItemDetailOut, ItemOut, ItemUpdate, LoginRequest, OrderAction, OrderCreate,
     OrderOut, PasswordChange, PointLogOut, ProductCreate, ProductOut, ProductUpdate,
     ProfileUpdate, RedeemOut, RedeemRequest, RedemptionOut, RegisterRequest, ReportCreate, ReportOut,
-    ReviewAction, UserOut, UserPublic,
+    ReviewAction, UserOut, UserPublic, MessageCreate, MessageOut, MessageRead,
 )
 
 APP_NAME = "绿循校园"
-APP_VERSION = "2.1.0"
+APP_VERSION = "2.2.0"
 
 logger = logging.getLogger("greencampus")
 
@@ -323,10 +323,10 @@ def user_profile(user_id: int) -> dict:
         carbon = conn.execute("SELECT COALESCE(SUM(carbon_saved), 0) FROM items WHERE owner_id = ?", (user_id,)).fetchone()[0]
         cycles = conn.execute("SELECT COALESCE(SUM(cycle_count), 0) FROM items WHERE owner_id = ?", (user_id,)).fetchone()[0]
         on_sale = conn.execute(
-            "SELECT COUNT(*) FROM items WHERE owner_id = ? AND status IN ('available','reserved')", (user_id,)
+            "SELECT COUNT(*) FROM items WHERE owner_id = ? AND status IN ('available','reserved') AND review_status = 'approved'", (user_id,)
         ).fetchone()[0]
         items = conn.execute(
-            ITEM_SQL + " WHERE i.owner_id = ? AND i.status IN ('available','reserved') ORDER BY i.id DESC LIMIT 12",
+            ITEM_SQL + " WHERE i.owner_id = ? AND i.status IN ('available','reserved') AND i.review_status = 'approved' ORDER BY i.id DESC LIMIT 12",
             (user_id,),
         ).fetchall()
     return {
@@ -354,7 +354,7 @@ def my_summary(user: dict = Depends(current_user)) -> dict:
         cycles = conn.execute("SELECT COALESCE(SUM(cycle_count), 0) FROM items WHERE owner_id = ?", (uid,)).fetchone()[0]
         favorites = conn.execute("SELECT COUNT(*) FROM favorites WHERE user_id = ?", (uid,)).fetchone()[0]
     return {
-        "user": user,
+        "user": UserOut.model_validate(user).model_dump(),
         "stats": {
             "published": published, "sold": sold, "bought": bought, "active_orders": active,
             "cycles": cycles, "carbon_kg": round(carbon, 2), "favorites": favorites,
@@ -833,30 +833,11 @@ ORDER_SQL = """
 """
 
 
-def attach_counterparty(conn, order: dict, viewer_id: Optional[int]) -> dict:
-    """按查看者过滤订单自提码与交易对方的联系方式。
-
-    线下履约需要买卖双方取得联系（约定自提时间地点），因此把对方的
-    姓名与联系方式开放给对侧参与方；非参与方（含管理员）一律不返回，
-    避免联系方式被无关人员读取。
-    """
+def order_for_viewer(conn, order: dict, viewer_id: Optional[int]) -> dict:
+    """按查看者过滤订单自提码，沟通统一使用订单站内会话。"""
     # The buyer holds the active pickup credential; sellers and admin views never receive it.
     if viewer_id != order["buyer_id"] or order["status"] not in ("reserved", "confirmed"):
         order["pickup_code"] = None
-    order["counterparty_name"] = None
-    order["counterparty_contact"] = None
-    if viewer_id is None or order["status"] not in ("reserved", "confirmed"):
-        return order
-    if viewer_id == order["buyer_id"]:
-        other_id = order["seller_id"]
-    elif viewer_id == order["seller_id"]:
-        other_id = order["buyer_id"]
-    else:
-        return order
-    row = conn.execute("SELECT name, contact FROM users WHERE id = ?", (other_id,)).fetchone()
-    if row:
-        order["counterparty_name"] = row["name"]
-        order["counterparty_contact"] = row["contact"]
     return order
 
 
@@ -891,7 +872,7 @@ def list_orders(user: dict = Depends(current_user), role: Optional[str] = Query(
     sql += " ORDER BY o.id DESC"
     with database.db_session() as conn:
         rows = conn.execute(sql, params).fetchall()
-        data = [attach_counterparty(conn, dict(r), user["id"]) for r in rows]
+        data = [order_for_viewer(conn, dict(r), user["id"]) for r in rows]
     return data
 
 
@@ -925,7 +906,7 @@ def create_order(payload: OrderCreate, user: dict = Depends(current_user)) -> di
             (payload.item_id, user["id"], item["owner_id"], code),
         )
         row = conn.execute(ORDER_SQL + " WHERE o.id = ?", (cur.lastrowid,)).fetchone()
-        return attach_counterparty(conn, dict(row), user["id"])
+        return order_for_viewer(conn, dict(row), user["id"])
 
 
 @app.post("/api/orders/{order_id}/confirm", response_model=OrderOut)
@@ -942,7 +923,7 @@ def confirm_order(order_id: int, payload: OrderAction, user: dict = Depends(curr
             raise HTTPException(status_code=400, detail="物品已下架或未通过审核，请取消订单或联系管理员")
         _transition(conn, order_id, "reserved", "confirmed")
         row = conn.execute(ORDER_SQL + " WHERE o.id = ?", (order_id,)).fetchone()
-        return attach_counterparty(conn, dict(row), user["id"])
+        return order_for_viewer(conn, dict(row), user["id"])
 
 
 @app.post("/api/orders/{order_id}/complete", response_model=OrderOut)
@@ -969,7 +950,7 @@ def complete_order(order_id: int, payload: OrderAction, user: dict = Depends(cur
         )
         database.add_points(conn, order["seller_id"], REWARD_CYCLE, f"完成流转《{item['title']}》获得碳积分")
         row = conn.execute(ORDER_SQL + " WHERE o.id = ?", (order_id,)).fetchone()
-        return attach_counterparty(conn, dict(row), user["id"])
+        return order_for_viewer(conn, dict(row), user["id"])
 
 
 @app.post("/api/orders/{order_id}/cancel", response_model=OrderOut)
@@ -984,7 +965,93 @@ def cancel_order(order_id: int, payload: OrderAction, user: dict = Depends(curre
         _transition(conn, order_id, order["status"], "cancelled")
         conn.execute("UPDATE items SET status = 'available' WHERE id = ? AND status = 'reserved'", (order["item_id"],))
         row = conn.execute(ORDER_SQL + " WHERE o.id = ?", (order_id,)).fetchone()
-        return attach_counterparty(conn, dict(row), user["id"])
+        return order_for_viewer(conn, dict(row), user["id"])
+
+
+# =======================================================================
+# 订单站内沟通：不开放任意用户私信，管理员角色本身不授予读取权限。
+# =======================================================================
+def conversation_order(conn, order_id: int, user_id: int) -> dict:
+    order = conn.execute("SELECT * FROM orders WHERE id = ? AND (buyer_id = ? OR seller_id = ?)", (order_id, user_id, user_id)).fetchone()
+    if not order:
+        raise HTTPException(status_code=404, detail="会话不存在或无权访问")
+    return dict(order)
+
+
+@app.get("/api/conversations")
+def conversations(user: dict = Depends(current_user)) -> List[dict]:
+    uid = user["id"]
+    with database.db_session() as conn:
+        rows = conn.execute("""
+            SELECT o.id AS order_id, o.status, o.buyer_id, o.seller_id, i.title AS item_title, i.image AS item_image,
+                   p.id AS peer_id, p.name AS peer_name, p.avatar AS peer_avatar,
+                   (SELECT content FROM order_messages WHERE order_id = o.id ORDER BY id DESC LIMIT 1) AS last_message,
+                   (SELECT created_at FROM order_messages WHERE order_id = o.id ORDER BY id DESC LIMIT 1) AS last_message_at,
+                   (SELECT COUNT(*) FROM order_messages m WHERE m.order_id = o.id AND m.sender_id != ?
+                    AND m.id > COALESCE(r.last_message_id, 0)) AS unread_count,
+                   COALESCE((SELECT MAX(id) FROM order_messages WHERE order_id = o.id), 0) AS latest_message_id
+            FROM orders o JOIN items i ON i.id = o.item_id
+            JOIN users p ON p.id = CASE WHEN o.buyer_id = ? THEN o.seller_id ELSE o.buyer_id END
+            LEFT JOIN order_message_reads r ON r.order_id = o.id AND r.user_id = ?
+            WHERE o.buyer_id = ? OR o.seller_id = ?
+            ORDER BY latest_message_id DESC, o.id DESC
+        """, (uid, uid, uid, uid, uid)).fetchall()
+    return rows_to_dicts(rows)
+
+
+@app.get("/api/orders/{order_id}/messages")
+def order_messages(order_id: int, user: dict = Depends(current_user),
+                   before: int = Query(0, ge=0), after: int = Query(0, ge=0),
+                   limit: int = Query(50, ge=1, le=100)) -> dict:
+    if before and after:
+        raise HTTPException(status_code=400, detail="不能同时使用前后分页游标")
+    with database.db_session() as conn:
+        conversation_order(conn, order_id, user["id"])
+        sql = "SELECT * FROM order_messages WHERE order_id = ?"
+        params = [order_id]
+        if before:
+            sql += " AND id < ?"
+            params.append(before)
+        if after:
+            sql += " AND id > ?"
+            params.append(after)
+        sql += " ORDER BY id " + ("ASC" if after else "DESC") + " LIMIT ?"
+        rows = conn.execute(sql, [*params, limit + 1]).fetchall()
+        messages = rows_to_dicts(rows[:limit])
+    if not after:
+        messages.reverse()
+    return {"messages": messages, "has_more": len(rows) > limit}
+
+
+@app.post("/api/orders/{order_id}/messages", response_model=MessageOut, status_code=201)
+def send_message(order_id: int, payload: MessageCreate, user: dict = Depends(current_user)) -> dict:
+    with database.db_session() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        order = conversation_order(conn, order_id, user["id"])
+        duplicate = conn.execute("SELECT * FROM order_messages WHERE order_id = ? AND sender_id = ? AND client_nonce = ?", (order_id, user["id"], payload.client_nonce)).fetchone()
+        if duplicate:
+            if duplicate["content"] != payload.content:
+                raise HTTPException(status_code=409, detail="发送凭证已使用，请重新发送")
+            return dict(duplicate)
+        if order["status"] not in ("reserved", "confirmed"):
+            raise HTTPException(status_code=400, detail="订单已结束，会话仅可查看历史消息")
+        recent = conn.execute("SELECT COUNT(*) FROM order_messages WHERE sender_id = ? AND created_at >= datetime('now','localtime','-1 minute')", (user["id"],)).fetchone()[0]
+        if recent >= 20:
+            raise HTTPException(status_code=429, detail="消息发送过于频繁，请稍后再试")
+        cursor = conn.execute("INSERT INTO order_messages (order_id, sender_id, content, client_nonce) VALUES (?, ?, ?, ?)", (order_id, user["id"], payload.content, payload.client_nonce))
+        return dict(conn.execute("SELECT * FROM order_messages WHERE id = ?", (cursor.lastrowid,)).fetchone())
+
+
+@app.post("/api/orders/{order_id}/messages/read")
+def read_messages(order_id: int, payload: MessageRead, user: dict = Depends(current_user)) -> dict:
+    with database.db_session() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        conversation_order(conn, order_id, user["id"])
+        if not conn.execute("SELECT 1 FROM order_messages WHERE id = ? AND order_id = ?", (payload.last_message_id, order_id)).fetchone():
+            raise HTTPException(status_code=400, detail="消息不属于当前会话")
+        conn.execute("""INSERT INTO order_message_reads (order_id, user_id, last_message_id) VALUES (?, ?, ?)
+                        ON CONFLICT(order_id, user_id) DO UPDATE SET last_message_id = MAX(last_message_id, excluded.last_message_id)""", (order_id, user["id"], payload.last_message_id))
+    return {"ok": True}
 
 
 # =======================================================================
@@ -1194,7 +1261,7 @@ def admin_orders(
         sql += " ORDER BY o.id DESC LIMIT ? OFFSET ?"
         params += [limit, offset]
         rows = conn.execute(sql, params).fetchall()
-        return [attach_counterparty(conn, dict(row), None) for row in rows]
+        return [order_for_viewer(conn, dict(row), None) for row in rows]
 
 
 @app.get("/api/admin/users")

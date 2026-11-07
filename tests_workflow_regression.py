@@ -95,16 +95,15 @@ class WorkflowRegression(unittest.TestCase):
         with self.assertRaises(HTTPException): main.admin_offshelf(item['id'], self.admin)
         with self.assertRaises(HTTPException): main.offshelf_own_item(item['id'], self.seller)
 
-    def test_closed_order_hides_counterparty_contact(self):
+    def test_order_response_no_longer_contains_contact_fields(self):
         item, order = self.reserve()
-        with database.db_session() as conn:
-            conn.execute("UPDATE users SET contact = 'private-contact' WHERE id = ?", (self.seller['id'],))
-        active = main.list_orders(self.buyer, 'buy')
-        self.assertEqual(next(o for o in active if o['id'] == order['id'])['counterparty_contact'], 'private-contact')
-        main.cancel_order(order['id'], OrderAction(), self.buyer)
-        closed = next(o for o in main.list_orders(self.buyer, 'buy') if o['id'] == order['id'])
-        self.assertIsNone(closed['counterparty_contact'])
-        self.assertIsNone(closed['counterparty_name'])
+        for user in [self.seller, self.buyer]:
+            result = next(o for o in main.list_orders(user, None) if o['id'] == order['id'])
+            self.assertNotIn('counterparty_contact', result)
+            self.assertNotIn('counterparty_name', result)
+        summary = main.my_summary(self.seller)
+        self.assertNotIn('contact', summary['user'])
+        self.assertNotIn('password_hash', summary['user'])
 
     def test_concurrent_completion_only_rewards_once(self):
         item, order = self.reserve()

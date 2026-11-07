@@ -1,7 +1,8 @@
 <script setup>
-import { ref, computed, watch } from 'vue'
+import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import { RouterLink, useRoute, useRouter } from 'vue-router'
 import Icon from './Icon.vue'
+import { useMessagesStore } from '@/stores/messages'
 import Avatar from './Avatar.vue'
 import { useAuthStore } from '@/stores/auth'
 import { useUiStore } from '@/stores/ui'
@@ -10,6 +11,14 @@ const auth = useAuthStore()
 const ui = useUiStore()
 const route = useRoute()
 const router = useRouter()
+const messages = useMessagesStore()
+let messageTimer
+async function refreshUnread() {
+  if (auth.isLoggedIn && !document.hidden) { try { await messages.load() } catch { /* retry on next poll */ } }
+}
+watch(() => auth.user?.id, () => { messages.reset(); refreshUnread() }, { immediate: true })
+onMounted(() => { messageTimer = setInterval(refreshUnread, 15000) })
+onUnmounted(() => clearInterval(messageTimer))
 const menuOpen = ref(false)
 const menuEl = ref(null)
 watch(() => route.fullPath, () => { menuOpen.value = false })
@@ -20,6 +29,7 @@ const tabs = computed(() => {
     { name: 'market', label: '市集', icon: 'cart' },
     { name: 'mall', label: '积分商城', icon: 'gift' },
     { name: 'dashboard', label: '绿色大屏', icon: 'chart' },
+    { name: 'messages', label: '站内消息', icon: 'message' },
     { name: 'me', label: '个人中心', icon: 'user' },
   ]
   if (auth.isAdmin) t.push({ name: 'admin', label: '后台管理', icon: 'shield' })
@@ -62,7 +72,7 @@ function closeMenu(e) {
                           :class="activeTab === t.name ? 'bg-brand-50 dark:bg-brand-500/15 text-brand-700 dark:text-brand-300' : 'text-muted hover:text-ink hover:bg-canvas'"
                           :aria-current="activeTab === t.name ? 'page' : undefined">
                 <Icon :name="t.icon" :size="18" />
-                <span class="hidden md:inline">{{ t.label }}</span>
+                <span class="hidden md:inline">{{ t.label }}</span><span v-if="t.name === 'messages' && messages.unreadCount" class="rounded-full bg-rose-600 text-white px-1.5 text-[10px]" :aria-label="`${messages.unreadCount} 条未读消息`">{{ messages.unreadCount > 99 ? '99+' : messages.unreadCount }}</span>
               </RouterLink>
             </div>
           </nav>
@@ -134,7 +144,7 @@ function closeMenu(e) {
     </main>
 
     <nav class="mobile-nav fixed bottom-0 inset-x-0 z-40 sm:hidden bg-surface border-t border-line flex" aria-label="移动端主导航">
-      <RouterLink v-for="t in tabs" :key="t.name" :to="{ name: t.name }" class="flex-1 flex flex-col items-center justify-center gap-1 min-h-[64px] text-[10px] font-medium" :class="activeTab === t.name ? 'text-brand-700 dark:text-brand-300 bg-brand-50 dark:bg-brand-500/10' : 'text-muted'" :aria-current="activeTab === t.name ? 'page' : undefined"><Icon :name="t.icon" :size="21" />{{ t.label }}</RouterLink>
+      <RouterLink v-for="t in tabs" :key="t.name" :to="{ name: t.name }" class="flex-1 flex flex-col items-center justify-center gap-1 min-h-[64px] text-[10px] font-medium" :class="activeTab === t.name ? 'text-brand-700 dark:text-brand-300 bg-brand-50 dark:bg-brand-500/10' : 'text-muted'" :aria-current="activeTab === t.name ? 'page' : undefined"><Icon :name="t.icon" :size="21" />{{ t.label }}<span v-if="t.name === 'messages' && messages.unreadCount" class="text-rose-600 dark:text-rose-300 text-[10px]">{{ messages.unreadCount }} 未读</span></RouterLink>
     </nav>
     <footer class="border-t border-line mt-auto mb-16 sm:mb-0">
       <div class="mx-auto max-w-7xl px-4 py-6 flex flex-wrap items-center justify-between gap-2 text-xs text-subtle">

@@ -223,17 +223,7 @@ onMounted(loadAll)
                     <template v-if="o.buyer_id === auth.user?.id">自提码仅你可见。{{ o.status === 'reserved' ? '请等待卖家确认预约；' : '' }}验货并完成交接后，再向卖家出示，由卖家录入核销，请勿提前透露。</template>
                     <template v-else>自提码仅买家可见。{{ o.status === 'reserved' ? '请先确认预约，约定交接时间。' : '完成线下交接后，请买家出示自提码，再点击录入核销。' }}</template>
                   </p>
-                  <!-- 线下履约需要联系对方：仅在订单处于进行中时展示对方联系方式 -->
-                  <p v-if="['reserved', 'confirmed'].includes(o.status) && o.counterparty_contact"
-                     class="mt-1 text-[11px] inline-flex items-center gap-1 text-brand-700 dark:text-brand-400">
-                    <Icon name="phone" :size="12" />
-                    <span>联系{{ tab === 'buy' ? '卖家' : '买家' }}{{ o.counterparty_name }}：</span>
-                    <code class="font-mono bg-brand-50 dark:bg-brand-500/10 px-1.5 rounded">{{ o.counterparty_contact }}</code>
-                  </p>
-                  <p v-else-if="['reserved', 'confirmed'].includes(o.status)"
-                     class="mt-1 text-[11px] text-subtle">
-                    对方尚未填写联系方式，可在个人资料中补充后告知
-                  </p>
+                  <RouterLink :to="`/messages/${o.id}`" class="mt-2 inline-flex items-center gap-1.5 text-xs font-medium text-brand-700 dark:text-brand-300 hover:underline"><Icon name="message" :size="15" />{{ ['reserved', 'confirmed'].includes(o.status) ? '站内沟通，约定自提' : '查看沟通记录' }}</RouterLink>
                 </div>
                 <span class="px-2.5 py-1 rounded-lg text-[11px] font-semibold shrink-0" :class="statusChip(o.status)">{{ statusLabel(o.status) }}</span>
               </div>

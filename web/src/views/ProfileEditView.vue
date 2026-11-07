@@ -15,7 +15,6 @@ const form = ref({
   name: auth.user?.name || '',
   college: auth.user?.college || '',
   bio: auth.user?.bio || '',
-  contact: auth.user?.contact || '',
 })
 const avatarPreview = ref(auth.user?.avatar || null)
 const pendingAvatar = ref(null)
@@ -61,7 +60,7 @@ async function saveProfile() {
     }
     const updated = await api.patch('/api/users/me', {
       name: form.value.name, college: form.value.college,
-      bio: form.value.bio, contact: form.value.contact,
+      bio: form.value.bio,
     })
     auth.setUser(updated)
     ui.toast('资料已保存')
@@ -156,15 +155,7 @@ async function changePassword() {
           <p class="mt-1 text-right text-[11px] text-subtle tnum">{{ form.bio.length }}/200</p>
         </div>
 
-        <div>
-          <label for="pf-contact" class="block text-[13px] font-medium text-ink mb-1.5">联系方式（仅本人可见）</label>
-          <div class="relative">
-            <Icon name="phone" :size="16" class="absolute left-3.5 top-1/2 -translate-y-1/2 text-subtle pointer-events-none" />
-            <input id="pf-contact" v-model.trim="form.contact" maxlength="100" placeholder="微信 / QQ / 手机号，便于买家线下联系"
-                   class="w-full h-11 pl-10 pr-3.5 rounded-xl bg-canvas border border-line text-sm text-ink placeholder:text-subtle focus:outline-none focus:ring-2 focus:ring-brand-500/40" />
-          </div>
-          <p class="mt-1 text-[11px] text-subtle">该信息不会展示在公开主页上</p>
-        </div>
+        <p class="rounded-xl border border-line bg-canvas p-3 text-xs text-muted leading-relaxed">平台不收集手机号、微信或 QQ 等联系方式。预约物品后，请通过订单内的站内沟通约定自提时间与地点。</p>
 
         <p v-if="err.global" class="text-[13px] text-rose-500">{{ err.global }}</p>
 
